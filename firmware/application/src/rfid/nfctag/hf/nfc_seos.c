@@ -179,6 +179,10 @@ static uint8_t KEY_ICC[16] = { 0x00 };
 static uint8_t KEY_IFD[16] = { 0x00 };
 static uint8_t diver_encr_key[16] = { 0x00 };
 static uint8_t diver_cmac_key[16] = { 0x00 };
+static bool seos_sm_active = false;
+
+#define SEOS_SW_SM_MISSING    0x6987
+#define SEOS_SW_SM_INCORRECT  0x6988
 
 /* Per-field anti-collision UID. 4-byte 08 RIDs are randomized so the
  * stored slot UID is not a static air-interface fingerprint. */
@@ -214,6 +218,7 @@ static void seos_refresh_session(void) {
     memset(KEY_IFD, 0, sizeof(KEY_IFD));
     memset(diver_encr_key, 0, sizeof(diver_encr_key));
     memset(diver_cmac_key, 0, sizeof(diver_cmac_key));
+    seos_sm_active = false;
 
     if (m_tag_information == NULL) {
         return;
@@ -224,6 +229,17 @@ static void seos_refresh_session(void) {
         session_uid[0] == 0x08) {
         seos_rng_fill(&session_uid[1], 3);
     }
+}
+
+static void seos_sm_fail(uint8_t *apdu_status, uint16_t sw) {
+    /* ISO7816: missing/incorrect SM objects are answered in the clear and
+     * end the session so the counters cannot be reused. */
+    seos_sm_active = false;
+    memset(diver_encr_key, 0, sizeof(diver_encr_key));
+    memset(diver_cmac_key, 0, sizeof(diver_cmac_key));
+    m_tcl_session_state.m_resp_len = 0;
+    apdu_status[0] = (uint8_t)(sw >> 8);
+    apdu_status[1] = (uint8_t)(sw & 0xFF);
 }
 
 /* ------------------------------------------------------------------ */
@@ -650,6 +666,7 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
 
                 memcpy(diver_encr_key, hash_output, 16);
                 memcpy(diver_cmac_key, hash_output + 16, 16);
+                seos_sm_active = true;
             } else {
                 NRF_LOG_ERROR("Seos: Mutual auth failed: Incorrect tag %02X found.", received_tlv[0]);
             }
@@ -673,8 +690,15 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
             uint8_t cryptogram_length = 0;
             uint8_t recvd_cmac_length = 0;
             uint8_t recvd_cmac_offset = 0;
+            bool has_protected_le = false;
 
-            // Extract cryptogram and CMAC
+            if (!seos_sm_active) {
+                seos_sm_fail(apdu_status, SEOS_SW_SM_INCORRECT);
+                break;
+            }
+
+            // Extract cryptogram, protected Le (97), and CMAC (8E).
+            // The command MAC covers every DO before 8E, including 97.
             uint8_t tlv_offset = 0;
             while (tlv_offset + 2 <= received_tlv_len) {
 
@@ -687,6 +711,7 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                     length &= 0x7F;
                     if (length != 1) {
                         NRF_LOG_ERROR("Seos: TLV element too long");
+                        seos_sm_fail(apdu_status, SEOS_SW_SM_INCORRECT);
                         break;
                     }
 
@@ -695,6 +720,7 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                 }
 
                 if (length > received_tlv_len - tlv_offset) {
+                    seos_sm_fail(apdu_status, SEOS_SW_SM_INCORRECT);
                     break;
                 }
 
@@ -703,6 +729,9 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                 if (tag == 0x85) {
                     cryptogram = value;
                     cryptogram_length = length;
+                } else if (tag == 0x97) {
+                    has_protected_le = true;
+                    (void)value;
                 } else if (tag == 0x8e) {
                     recvd_cmac = value;
                     recvd_cmac_length = length;
@@ -712,9 +741,22 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                 tlv_offset += length;
             }
 
+            (void)has_protected_le;
+
+            if (apdu_status[0] == 0x69) {
+                break;
+            }
+
+            if (recvd_cmac == NULL || cryptogram == NULL) {
+                NRF_LOG_ERROR("Seos: Get Data failed: Missing SM data object.");
+                seos_sm_fail(apdu_status, SEOS_SW_SM_MISSING);
+                break;
+            }
+
             if (cryptogram != NULL && recvd_cmac != NULL) {
                 if (cryptogram_length > WORK_BUFFER_SIZE) {
                     NRF_LOG_ERROR("Seos: Get Data failed: Recieved cryptogram too long.");
+                    seos_sm_fail(apdu_status, SEOS_SW_SM_INCORRECT);
                     break;
                 }
 
@@ -750,8 +792,10 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                 // Add received TLV data to mac_input
                 if (mac_input_idx + recvd_cmac_offset + bs > WORK_BUFFER_SIZE) {
                     NRF_LOG_ERROR("Seos: Get Data failed: CMAC input too large.");
+                    seos_sm_fail(apdu_status, SEOS_SW_SM_INCORRECT);
                     break;
                 }
+                /* Includes 85 and protected Le (97) when the reader sent them. */
                 memcpy(mac_input + mac_input_idx, received_tlv, recvd_cmac_offset);
                 mac_input_idx += recvd_cmac_offset;
 
@@ -765,10 +809,12 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                 uint8_t *cmac = work_buffer_b;
                 if (!generate_cmac(diver_cmac_key, mac_input, mac_input_idx, cmac, m_tag_information->encr_alg)) {
                     NRF_LOG_ERROR("Seos: Get Data failed: Failed to create CMAC.");
+                    seos_sm_fail(apdu_status, SEOS_SW_SM_INCORRECT);
                     break;
                 }
                 if (memcmp(cmac, recvd_cmac, recvd_cmac_length) != 0) {
                     NRF_LOG_ERROR("Seos: Get Data failed: Invalid CMAC.");
+                    seos_sm_fail(apdu_status, SEOS_SW_SM_INCORRECT);
                     break;
                 }
 
@@ -901,6 +947,7 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                 apdu_status[1] = 0x00;
             } else {
                 NRF_LOG_ERROR("Seos: Get Data failed: No cryptogram or CMAC found in request.");
+                seos_sm_fail(apdu_status, SEOS_SW_SM_MISSING);
             }
         }
         break;
