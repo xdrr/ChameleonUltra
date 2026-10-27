@@ -53,6 +53,12 @@ from chameleon_enum import (
     MfcValueBlockOperator,
 )
 from chameleon_enum import HIDFormat
+from chameleon_seos import (
+    add_seos_alg_args,
+    format_seos_eview,
+    parse_seos_encr_alg,
+    parse_seos_hash_alg,
+)
 from crypto1 import Crypto1
 
 # NXP IDs based on https://www.nxp.com/docs/en/application-note/AN10833.pdf
@@ -11437,11 +11443,8 @@ class HFSeosEView(SlotIndexArgsAndGoUnit, DeviceRequiredUnit):
         if tag_type != TagSpecificType.SEOS:
             raise Exception("Card in current slot is not SEOS")
         data = self.cmd.seos_read_emu_data()
-
-        print("[=]        Data:", data["data"].hex().upper())
-        print("[=]         OID:", data["oid"].hex().upper())
-        print("[=]         Tag:", data["tag"].hex().upper())
-        print("[=] Diversifier:", data["diversifier"].hex().upper())
+        for line in format_seos_eview(data):
+            print(line)
         print(
             "[=] Note: 4-byte 08 UIDs, RND.ICC, KEY.ICC and ADF IV are randomized on field reset"
         )
@@ -11485,6 +11488,7 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
             metavar="<hex>",
             help="Simulated card diversifier (1-16 bytes).",
         )
+        add_seos_alg_args(parser)
         return parser
 
     def on_exec(self, args: argparse.Namespace):
@@ -11514,6 +11518,8 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
             and args.oid is None
             and args.tag is None
             and args.diversifier is None
+            and args.hash is None
+            and args.encr is None
             and change_requested is False
         ):
             print(color_string((CR, "Error: No changes were requested.")))
@@ -11529,10 +11535,16 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
             if args.diversifier
             else seos_data["diversifier"]
         )
-
-        # These are not currently configurable
-        hash_alg = seos_data["hash_alg"]
-        encr_alg = seos_data["encr_alg"]
+        try:
+            hash_alg = (
+                parse_seos_hash_alg(args.hash) if args.hash else seos_data["hash_alg"]
+            )
+            encr_alg = (
+                parse_seos_encr_alg(args.encr) if args.encr else seos_data["encr_alg"]
+            )
+        except ValueError as err:
+            print(color_string((CR, f"Error: {err}")))
+            return
 
         if len(data) < 2 or len(data) > 255:
             print(
