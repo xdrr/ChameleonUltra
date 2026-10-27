@@ -1,6 +1,6 @@
 """SEOS emulator helpers shared by the CLI (algorithm names and eview)."""
 
-from typing import Dict, Iterable, List, Mapping, Union
+from typing import Callable, Dict, Iterable, List, Mapping, Union
 
 SEOS_HASH_SHA1 = 0x06
 SEOS_HASH_SHA256 = 0x07
@@ -78,6 +78,32 @@ def add_seos_alg_args(parser) -> None:
         metavar="<alg>",
         help="Encryption algorithm: aes, 2k3des, 3k3des, or hex (02/03/09).",
     )
+
+
+SEOS_SHILL_SELECT_CRYPTOGRAM_LEN = 0x40
+SEOS_SHILL_SELECT_CMAC_LEN = 0x08
+SEOS_SHILL_AUTH_BODY_LEN = 0x28
+
+
+def build_seos_shill_select_adf(
+    rng: Callable[[int], bytes],
+    encr_alg: int = SEOS_ENCR_AES,
+    hash_alg: int = SEOS_HASH_SHA256,
+) -> bytes:
+    """Well-formed random SELECT ADF reply. Does not leak file-not-found."""
+    return (
+        bytes([0xCD, 0x02, encr_alg, hash_alg, 0x85, SEOS_SHILL_SELECT_CRYPTOGRAM_LEN])
+        + rng(SEOS_SHILL_SELECT_CRYPTOGRAM_LEN)
+        + bytes([0x8E, SEOS_SHILL_SELECT_CMAC_LEN])
+        + rng(SEOS_SHILL_SELECT_CMAC_LEN)
+    )
+
+
+def build_seos_shill_authenticate(rng: Callable[[int], bytes]) -> bytes:
+    """Well-formed random GA2 reply. Failed auth looks like a cryptogram, not 6A82."""
+    return bytes(
+        [0x7C, SEOS_SHILL_AUTH_BODY_LEN + 2, 0x82, SEOS_SHILL_AUTH_BODY_LEN]
+    ) + rng(SEOS_SHILL_AUTH_BODY_LEN)
 
 
 def format_seos_eview(data: Dict[str, Union[bytes, int]]) -> List[str]:

@@ -15,6 +15,8 @@ from chameleon_seos import (  # noqa: E402
     SEOS_ENCR_AES,
     SEOS_HASH_SHA1,
     SEOS_HASH_SHA256,
+    build_seos_shill_authenticate,
+    build_seos_shill_select_adf,
     format_seos_eview,
     parse_seos_encr_alg,
     parse_seos_hash_alg,
@@ -89,6 +91,39 @@ class TestSeosELoadArgs(unittest.TestCase):
         args = parser.parse_args(["--hash", "sha256", "--encr", "aes"])
         self.assertEqual(args.hash, "sha256")
         self.assertEqual(args.encr, "aes")
+
+
+class TestSeosPrivacyShill(unittest.TestCase):
+    def test_select_shill_is_well_formed_cd_85_8e(self):
+        rng = iter(bytes(range(0x40)) + bytes(range(0x10, 0x18)))
+        body = build_seos_shill_select_adf(
+            rng=lambda n: bytes(next(rng) for _ in range(n)),
+            encr_alg=SEOS_ENCR_AES,
+            hash_alg=SEOS_HASH_SHA256,
+        )
+        self.assertEqual(body[0], 0xCD)
+        self.assertEqual(body[1], 0x02)
+        self.assertEqual(body[2], SEOS_ENCR_AES)
+        self.assertEqual(body[3], SEOS_HASH_SHA256)
+        self.assertEqual(body[4], 0x85)
+        self.assertEqual(body[5], 0x40)
+        self.assertEqual(body[6:70], bytes(range(0x40)))
+        self.assertEqual(body[70], 0x8E)
+        self.assertEqual(body[71], 0x08)
+        self.assertEqual(body[72:80], bytes(range(0x10, 0x18)))
+        self.assertEqual(len(body), 80)
+
+    def test_auth_shill_is_well_formed_7c_82(self):
+        rng = iter(bytes(range(0x28)))
+        body = build_seos_shill_authenticate(
+            rng=lambda n: bytes(next(rng) for _ in range(n))
+        )
+        self.assertEqual(body[0], 0x7C)
+        self.assertEqual(body[1], 0x2A)
+        self.assertEqual(body[2], 0x82)
+        self.assertEqual(body[3], 0x28)
+        self.assertEqual(body[4:44], bytes(range(0x28)))
+        self.assertEqual(len(body), 44)
 
 
 if __name__ == "__main__":

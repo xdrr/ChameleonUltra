@@ -310,6 +310,44 @@ static bool seos_fill_select_df_response(uint8_t *apdu_status) {
     return true;
 }
 
+/* Flipper-style privacy shill: well-formed success so unmatched ADF / failed
+ * GA2 do not leak 6A82 (file not found) to an unauthorized reader. */
+#define SEOS_SHILL_SELECT_CRYPTOGRAM_LEN  0x40
+#define SEOS_SHILL_SELECT_CMAC_LEN        0x08
+#define SEOS_SHILL_AUTH_BODY_LEN          0x28
+
+static void seos_fill_shill_select_adf(uint8_t *apdu_status) {
+    uint16_t tlv_idx = 0;
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = 0xCD;
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = 0x02;
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = m_tag_information->encr_alg;
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = m_tag_information->hash_alg;
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = 0x85;
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = SEOS_SHILL_SELECT_CRYPTOGRAM_LEN;
+    seos_rng_fill(m_tcl_session_state.m_resp_buf + tlv_idx, SEOS_SHILL_SELECT_CRYPTOGRAM_LEN);
+    tlv_idx += SEOS_SHILL_SELECT_CRYPTOGRAM_LEN;
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = 0x8E;
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = SEOS_SHILL_SELECT_CMAC_LEN;
+    seos_rng_fill(m_tcl_session_state.m_resp_buf + tlv_idx, SEOS_SHILL_SELECT_CMAC_LEN);
+    tlv_idx += SEOS_SHILL_SELECT_CMAC_LEN;
+    m_tcl_session_state.m_resp_len = tlv_idx;
+    apdu_status[0] = 0x90;
+    apdu_status[1] = 0x00;
+}
+
+static void seos_fill_shill_authenticate(uint8_t *apdu_status) {
+    uint16_t tlv_idx = 0;
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = 0x7C;
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = SEOS_SHILL_AUTH_BODY_LEN + 2;
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = 0x82;
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = SEOS_SHILL_AUTH_BODY_LEN;
+    seos_rng_fill(m_tcl_session_state.m_resp_buf + tlv_idx, SEOS_SHILL_AUTH_BODY_LEN);
+    tlv_idx += SEOS_SHILL_AUTH_BODY_LEN;
+    m_tcl_session_state.m_resp_len = tlv_idx;
+    apdu_status[0] = 0x90;
+    apdu_status[1] = 0x00;
+}
+
 /* ------------------------------------------------------------------ */
 /*  State handler (called from NFCT ISR on each received frame)        */
 /* ------------------------------------------------------------------ */
@@ -408,6 +446,8 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
 
             if (selected_oid) {
                 seos_fill_select_df_response(apdu_status);
+            } else {
+                seos_fill_shill_select_adf(apdu_status);
             }
         }
         break;
@@ -566,6 +606,10 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                 memcpy(diver_cmac_key, hash_output + 16, 16);
             } else {
                 NRF_LOG_ERROR("Seos: Mutual auth failed: Incorrect tag %02X found.", received_tlv[0]);
+            }
+
+            if (apdu_status[0] != 0x90) {
+                seos_fill_shill_authenticate(apdu_status);
             }
         }
         break;
