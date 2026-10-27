@@ -660,9 +660,10 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
         }
         break;
 
-        case 0xDA:   // PUT DATA
+        case 0xDA:   // PUT DATA (PM3 emulator alias)
+        case 0xDB:   // UPDATE DATA
         case 0xCB: { // GET DATA
-            bool is_put = receivedCmd[1] == 0xDA;
+            bool is_put = (receivedCmd[1] == 0xDA || receivedCmd[1] == 0xDB);
 
             uint8_t received_tlv_len = receivedCmd[4];
             uint8_t *received_tlv = &receivedCmd[5];
@@ -777,10 +778,22 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                 uint16_t tlv_idx = 0;
 
                 if (is_put) {
-                    apdu_status[0] = 0x6A;
-                    apdu_status[1] = 0x81;
-                    NRF_LOG_ERROR("Seos: Put Data failed: Not implemented");
-                    break;
+                    /* PM3 UPDATE DATA plaintext is tag (2) || length || value. */
+                    if (cryptogram_length < 3) {
+                        NRF_LOG_ERROR("Seos: Update Data failed: Object too short.");
+                        break;
+                    }
+                    uint8_t obj_tag_len = 2;
+                    uint8_t obj_len = request[obj_tag_len];
+                    if (obj_len == 0 || obj_len > NFC_TAG_SEOS_DATA_MAX ||
+                        (uint16_t)(obj_tag_len + 1 + obj_len) > cryptogram_length) {
+                        NRF_LOG_ERROR("Seos: Update Data failed: Invalid object length.");
+                        break;
+                    }
+                    memcpy(m_tag_information->data_tag, request, obj_tag_len);
+                    m_tag_information->data_tag_len = obj_tag_len;
+                    memcpy(m_tag_information->data, request + obj_tag_len + 1, obj_len);
+                    m_tag_information->data_len = obj_len;
                 } else {
                     //5c 02 ff 00
                     if (request[0] != 0x5C) {

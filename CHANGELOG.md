@@ -8,6 +8,7 @@ This project uses the changelog in accordance with [keepchangelog](http://keepac
  - SEOS emulator: unmatched ADF OID and failed mutual-auth return a well-formed privacy shill instead of 6A82
  - SEOS emulator: store a distinct Global DF OID/diversifier; `hf seos eload --gdf-oid/--gdf-div` and `eview` can load and show it
  - SEOS emulator: P2=02 mutual-auth uses a second write-auth master; `hf seos keys --write` loads it
+ - SEOS emulator: accept UPDATE DATA (`0C DB`) and persist the named object into emulator memory
 
 ## [v2.3.0][2026-10-24]
  - Added Farpointe/Pyramid LF protocol support: read and emulate (FSK2a, RF/50)
