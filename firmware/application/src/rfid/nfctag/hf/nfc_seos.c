@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#include <stdlib.h>
 #include <string.h>
 #include "nfc_seos.h"
 #include "nfc_14a_4.h"
@@ -13,6 +14,7 @@
 #include "tag_persistence.h"
 #include "fds_util.h"
 #include "nrf_log.h"
+#include "nrf_drv_rng.h"
 
 #include <nrf_crypto_aes.h>
 #include <nrf_crypto_hash.h>
@@ -178,6 +180,52 @@ static uint8_t KEY_IFD[16] = { 0x00 };
 static uint8_t diver_encr_key[16] = { 0x00 };
 static uint8_t diver_cmac_key[16] = { 0x00 };
 
+/* Per-field anti-collision UID. 4-byte 08 RIDs are randomized so the
+ * stored slot UID is not a static air-interface fingerprint. */
+static uint8_t session_uid[10];
+
+static void seos_rng_fill(uint8_t *buf, uint8_t len) {
+    uint8_t got = 0;
+    uint32_t guard = 0;
+    while (got < len) {
+        uint8_t avail = 0;
+        nrf_drv_rng_bytes_available(&avail);
+        if (avail > 0) {
+            uint8_t want = (uint8_t)(len - got);
+            uint8_t chunk = (avail < want) ? avail : want;
+            if (nrf_drv_rng_rand(buf + got, chunk) == NRF_SUCCESS) {
+                got += chunk;
+                continue;
+            }
+        }
+        if (++guard > 200000) {
+            while (got < len) {
+                buf[got++] = (uint8_t)rand();
+            }
+            break;
+        }
+    }
+}
+
+static void seos_refresh_session(void) {
+    seos_rng_fill(RND_ICC, sizeof(RND_ICC));
+    seos_rng_fill(KEY_ICC, sizeof(KEY_ICC));
+    memset(RND_IFD, 0, sizeof(RND_IFD));
+    memset(KEY_IFD, 0, sizeof(KEY_IFD));
+    memset(diver_encr_key, 0, sizeof(diver_encr_key));
+    memset(diver_cmac_key, 0, sizeof(diver_cmac_key));
+
+    if (m_tag_information == NULL) {
+        return;
+    }
+
+    memcpy(session_uid, m_tag_information->res_coll.uid, sizeof(session_uid));
+    if (m_tag_information->res_coll.size == NFC_TAG_14A_UID_SINGLE_SIZE &&
+        session_uid[0] == 0x08) {
+        seos_rng_fill(&session_uid[1], 3);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /*  Anti-collision resource                                             */
 /* ------------------------------------------------------------------ */
@@ -186,7 +234,7 @@ nfc_tag_14a_coll_res_reference_t *nfc_tag_seos_get_coll_res(void) {
     if (m_tag_information == NULL) return NULL;
     m_shadow_coll_res.sak  = m_tag_information->res_coll.sak;
     m_shadow_coll_res.atqa = m_tag_information->res_coll.atqa;
-    m_shadow_coll_res.uid  = m_tag_information->res_coll.uid;
+    m_shadow_coll_res.uid  = session_uid;
     m_shadow_coll_res.size = &m_tag_information->res_coll.size;
     m_shadow_coll_res.ats  = &m_tag_information->res_coll.ats;
     return &m_shadow_coll_res;
@@ -246,6 +294,14 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
         break;
 
         case 0xA5: {  // SELECT OID
+            // Global DF is 00 A5 07 .. (no ADF TLV). Until GDF content is
+            // implemented, return a defined SW rather than "file not found".
+            if (receivedCmd[2] == 0x07 || receivedCmd[4] == 0x00) {
+                apdu_status[0] = 0x6A;
+                apdu_status[1] = 0x81;
+                break;
+            }
+
             // This is specific to Seos
             // Should be a TLV structure with the OID stored in tag 0x06
             uint8_t received_tlv_len = receivedCmd[4];
@@ -279,12 +335,15 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
             NRF_LOG_DEBUG("Seos: Selected OID? %d", selected_oid);
 
             if (selected_oid) {
-                // Synthesized IV: half a block of random data followed by half of the CMAC of that data
-                memset(cryptogram_iv, 0, half_bs); // TODO: Maybe actually use random data?
-                if (!generate_cmac(m_tag_information->privmac, cryptogram_iv, half_bs, work_buffer_a, m_tag_information->encr_alg)) {
+                // Synthesized IV: half a block of random data followed by half of the CMAC of that data.
+                // generate_cmac() zeros the shared cryptogram_iv, so keep the random half local.
+                uint8_t iv_rand[16];
+                seos_rng_fill(iv_rand, half_bs);
+                if (!generate_cmac(m_tag_information->privmac, iv_rand, half_bs, work_buffer_a, m_tag_information->encr_alg)) {
                    NRF_LOG_ERROR("Seos: Select ADF failed: Failed to create IV CMAC.");
                    break;
                 }
+                memcpy(cryptogram_iv, iv_rand, half_bs);
                 memcpy(cryptogram_iv + half_bs, work_buffer_a, half_bs);
 
                 // Always exactly 0x30 bytes in length
@@ -625,6 +684,8 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                 uint16_t tlv_idx = 0;
 
                 if (is_put) {
+                    apdu_status[0] = 0x6A;
+                    apdu_status[1] = 0x81;
                     NRF_LOG_ERROR("Seos: Put Data failed: Not implemented");
                     break;
                 } else {
@@ -761,6 +822,7 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
 
 void nfc_tag_seos_reset_handler(void) {
     nfc_tag_14a_4_reset_state(&m_tcl_session_state);
+    seos_refresh_session();
 }
 
 /* ------------------------------------------------------------------ */
@@ -775,6 +837,8 @@ int nfc_tag_seos_data_loadcb(tag_specific_type_t type, tag_data_buffer_t *buffer
         return info_size;
     }
     m_tag_information = (nfc_tag_seos_information_t *)buffer->buffer;
+    memcpy(session_uid, m_tag_information->res_coll.uid, sizeof(session_uid));
+    seos_refresh_session();
 
     nfc_tag_14a_handler_t handler = {
         .get_coll_res = nfc_tag_seos_get_coll_res,

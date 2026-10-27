@@ -11442,6 +11442,9 @@ class HFSeosEView(SlotIndexArgsAndGoUnit, DeviceRequiredUnit):
         print("[=]         OID:", data["oid"].hex().upper())
         print("[=]         Tag:", data["tag"].hex().upper())
         print("[=] Diversifier:", data["diversifier"].hex().upper())
+        print(
+            "[=] Note: 4-byte 08 UIDs, RND.ICC, KEY.ICC and ADF IV are randomized on field reset"
+        )
 
 
 @hf_seos.command("eload")
