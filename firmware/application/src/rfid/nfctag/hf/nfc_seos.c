@@ -260,6 +260,22 @@ bool seos_gdf_record_valid(const nfc_tag_seos_information_t *info) {
            info->gdf_diversifier_len > 0 && info->gdf_diversifier_len <= NFC_TAG_SEOS_DIVERSIFIER_MAX;
 }
 
+void seos_apply_default_writekey(nfc_tag_seos_information_t *info) {
+    memcpy(info->authkey_write, info->authkey, 16);
+    info->writekey_magic = SEOS_WRITEKEY_MAGIC;
+}
+
+bool seos_writekey_valid(const nfc_tag_seos_information_t *info) {
+    return info->writekey_magic == SEOS_WRITEKEY_MAGIC;
+}
+
+const uint8_t *seos_auth_master_for_keyslot(const nfc_tag_seos_information_t *info, uint8_t keyslot) {
+    if (keyslot == SEOS_KEYSLOT_WRITE) {
+        return info->authkey_write;
+    }
+    return info->authkey;
+}
+
 /* Public SELECT DF reply used by both ADF and GDF: CD (algs) + 85 (IV||cryptogram) + 8E (CMAC).
  * Plaintext inside the cryptogram is OID 0x06 and diversifier 0xCF. */
 static bool seos_fill_select_df_response(uint8_t *apdu_status,
@@ -525,9 +541,10 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                 }
 
                 uint8_t keyslot = receivedCmd[3]; // APDU P2 byte
+                const uint8_t *auth_master = seos_auth_master_for_keyslot(m_tag_information, keyslot);
 
-                seos_kdf(true, m_tag_information->authkey, keyslot, work_buffer_a, m_tag_information->oid, m_tag_information->oid_len, m_tag_information->diversifier, m_tag_information->diversifier_len, diver_encr_key, m_tag_information->encr_alg, m_tag_information->hash_alg);
-                seos_kdf(false, m_tag_information->authkey, keyslot, work_buffer_a, m_tag_information->oid, m_tag_information->oid_len, m_tag_information->diversifier, m_tag_information->diversifier_len, diver_cmac_key, m_tag_information->encr_alg, m_tag_information->hash_alg);
+                seos_kdf(true, (uint8_t *)auth_master, keyslot, work_buffer_a, m_tag_information->oid, m_tag_information->oid_len, m_tag_information->diversifier, m_tag_information->diversifier_len, diver_encr_key, m_tag_information->encr_alg, m_tag_information->hash_alg);
+                seos_kdf(false, (uint8_t *)auth_master, keyslot, work_buffer_a, m_tag_information->oid, m_tag_information->oid_len, m_tag_information->diversifier, m_tag_information->diversifier_len, diver_cmac_key, m_tag_information->encr_alg, m_tag_information->hash_alg);
 
                 // Verify CMAC (last 8 bytes)
                 uint8_t request_len = received_tlv_len - 8;
@@ -916,6 +933,9 @@ int nfc_tag_seos_data_loadcb(tag_specific_type_t type, tag_data_buffer_t *buffer
     if (!seos_gdf_record_valid(m_tag_information)) {
         seos_apply_factory_gdf(m_tag_information);
     }
+    if (!seos_writekey_valid(m_tag_information)) {
+        seos_apply_default_writekey(m_tag_information);
+    }
     memcpy(session_uid, m_tag_information->res_coll.uid, sizeof(session_uid));
     seos_refresh_session();
 
@@ -984,6 +1004,7 @@ bool nfc_tag_seos_data_factory(uint8_t slot, tag_specific_type_t tag_type) {
     info.encr_alg = SEOS_ENCRYPTION_AES;
     info.hash_alg = SEOS_HASHING_SHA256;
     seos_apply_factory_gdf(&info);
+    seos_apply_default_writekey(&info);
 
     fds_slot_record_map_t map_info;
     get_fds_map_by_slot_sense_type_for_dump(slot, TAG_SENSE_HF, &map_info);

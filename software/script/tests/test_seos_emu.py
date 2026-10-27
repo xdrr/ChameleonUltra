@@ -18,16 +18,25 @@ from chameleon_seos import (  # noqa: E402
     SEOS_FACTORY_GDF_OID,
     SEOS_HASH_SHA1,
     SEOS_HASH_SHA256,
+    SEOS_KEYSLOT_WRITE,
+    SEOS_SW_SM_INCORRECT,
+    SEOS_SW_SM_MISSING,
     add_seos_gdf_args,
+    add_seos_write_key_arg,
     build_seos_shill_authenticate,
     build_seos_shill_select_adf,
     format_seos_eview,
     pack_seos_emu_data,
+    pack_seos_emu_keys,
     parse_seos_encr_alg,
     parse_seos_hash_alg,
+    seos_auth_master_for_keyslot,
     seos_encr_alg_name,
     seos_hash_alg_name,
+    seos_parse_put_object,
+    seos_sm_mac_objects,
     unpack_seos_emu_data,
+    unpack_seos_emu_keys,
 )
 
 
@@ -196,6 +205,75 @@ class TestSeosGdfRecord(unittest.TestCase):
         )
         self.assertEqual(args.gdf_oid, "03010709FFFFFFFFFF")
         self.assertEqual(args.gdf_div, "00000000000000")
+
+
+class TestSeosAuthKeyslot(unittest.TestCase):
+    def test_p2_02_selects_write_master(self):
+        read_key = bytes(range(16))
+        write_key = bytes(range(16, 32))
+        self.assertEqual(
+            seos_auth_master_for_keyslot(SEOS_KEYSLOT_WRITE, read_key, write_key),
+            write_key,
+        )
+        self.assertEqual(
+            seos_auth_master_for_keyslot(0x01, read_key, write_key), read_key
+        )
+        self.assertEqual(
+            seos_auth_master_for_keyslot(0x00, read_key, write_key), read_key
+        )
+
+    def test_keys_parser_accepts_write_key(self):
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        add_seos_write_key_arg(parser)
+        args = parser.parse_args(["--write", "00112233445566778899AABBCCDDEEFF"])
+        self.assertEqual(args.write, "00112233445566778899AABBCCDDEEFF")
+
+    def test_pack_unpack_keys_optional_write(self):
+        auth = bytes(range(16))
+        privenc = bytes(range(16, 32))
+        privmac = bytes(range(32, 48))
+        write = bytes(range(48, 64))
+        packed = pack_seos_emu_keys(auth, privenc, privmac)
+        self.assertEqual(len(packed), 48)
+        parsed = unpack_seos_emu_keys(packed)
+        self.assertEqual(parsed["auth"], auth)
+        self.assertNotIn("auth_write", parsed)
+        packed_w = pack_seos_emu_keys(auth, privenc, privmac, write)
+        self.assertEqual(len(packed_w), 64)
+        parsed_w = unpack_seos_emu_keys(packed_w)
+        self.assertEqual(parsed_w["auth_write"], write)
+
+
+class TestSeosUpdateData(unittest.TestCase):
+    def test_parse_put_object_tag_len_value(self):
+        tag, value = seos_parse_put_object(bytes.fromhex("FF000412345678"))
+        self.assertEqual(tag, bytes.fromhex("FF00"))
+        self.assertEqual(value, bytes.fromhex("12345678"))
+
+    def test_parse_put_object_rejects_truncated(self):
+        with self.assertRaises(ValueError):
+            seos_parse_put_object(bytes.fromhex("FF00"))
+        with self.assertRaises(ValueError):
+            seos_parse_put_object(bytes.fromhex("FF0005AABB"))
+
+
+class TestSeosSecureMessaging(unittest.TestCase):
+    def test_sm_status_words(self):
+        self.assertEqual(SEOS_SW_SM_MISSING, 0x6987)
+        self.assertEqual(SEOS_SW_SM_INCORRECT, 0x6988)
+
+    def test_mac_objects_include_protected_le(self):
+        body = bytes.fromhex("8510" + "11" * 16 + "9700" + "8E08" + "22" * 8)
+        objects, cmac = seos_sm_mac_objects(body)
+        self.assertEqual(objects, bytes.fromhex("8510" + "11" * 16 + "9700"))
+        self.assertEqual(cmac, bytes.fromhex("22" * 8))
+
+    def test_missing_checksum_is_missing_do(self):
+        with self.assertRaises(ValueError) as err:
+            seos_sm_mac_objects(bytes.fromhex("8510" + "11" * 16 + "9700"))
+        self.assertEqual(str(err.exception), "missing")
 
 
 if __name__ == "__main__":

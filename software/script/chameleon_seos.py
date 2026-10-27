@@ -214,3 +214,92 @@ def format_seos_eview(data: Dict[str, Union[bytes, int]]) -> List[str]:
         ]
     )
     return lines
+
+
+SEOS_KEYSLOT_WRITE = 0x02
+SEOS_SW_SM_MISSING = 0x6987
+SEOS_SW_SM_INCORRECT = 0x6988
+
+
+def seos_auth_master_for_keyslot(
+    keyslot: int, read_key: bytes, write_key: bytes
+) -> bytes:
+    """Flipper: P2 0x02 is the ADF write master; anything else is the read master."""
+    if keyslot == SEOS_KEYSLOT_WRITE:
+        return write_key
+    return read_key
+
+
+def add_seos_write_key_arg(parser) -> None:
+    parser.add_argument(
+        "-w",
+        "--write",
+        type=str,
+        default=None,
+        metavar="<hex>",
+        help="Write-auth key (16 bytes). Used when the reader sends P2=02.",
+    )
+
+
+def pack_seos_emu_keys(
+    auth: bytes,
+    privenc: bytes,
+    privmac: bytes,
+    auth_write: Optional[bytes] = None,
+) -> bytes:
+    payload = auth + privenc + privmac
+    if auth_write is not None:
+        payload += auth_write
+    return payload
+
+
+def unpack_seos_emu_keys(payload: bytes) -> Dict[str, bytes]:
+    if len(payload) not in (48, 64):
+        raise ValueError("SEOS key payload must be 48 or 64 bytes")
+    parsed = {
+        "auth": payload[0:16],
+        "privenc": payload[16:32],
+        "privmac": payload[32:48],
+    }
+    if len(payload) == 64:
+        parsed["auth_write"] = payload[48:64]
+    return parsed
+
+
+def seos_parse_put_object(plaintext: bytes) -> tuple:
+    """UPDATE DATA plaintext is tag (2 bytes) || length || value."""
+    if len(plaintext) < 3:
+        raise ValueError("UPDATE DATA object is truncated")
+    tag = plaintext[0:2]
+    length = plaintext[2]
+    if len(plaintext) < 3 + length:
+        raise ValueError("UPDATE DATA object is truncated")
+    return tag, plaintext[3 : 3 + length]
+
+
+def seos_sm_mac_objects(body: bytes) -> tuple:
+    """Split an SM body into DOs covered by the MAC (including 97) and the 8E CMAC."""
+    offset = 0
+    mac_end = None
+    cmac = None
+    while offset + 2 <= len(body):
+        tag = body[offset]
+        length = body[offset + 1]
+        header = 2
+        if length & 0x80:
+            extra = length & 0x7F
+            if extra != 1 or offset + 2 + extra > len(body):
+                raise ValueError("incorrect")
+            length = body[offset + 2]
+            header = 3
+        end = offset + header + length
+        if end > len(body):
+            raise ValueError("incorrect")
+        if tag == 0x8E:
+            mac_end = offset
+            cmac = body[offset + header : end]
+            break
+        offset = end
+    if mac_end is None or cmac is None:
+        raise ValueError("missing")
+    return body[:mac_end], cmac

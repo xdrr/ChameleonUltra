@@ -3,7 +3,7 @@ import ctypes
 from typing import Union
 
 import chameleon_com
-from chameleon_seos import pack_seos_emu_data, unpack_seos_emu_data
+from chameleon_seos import pack_seos_emu_data, pack_seos_emu_keys, unpack_seos_emu_data
 from chameleon_utils import expect_response, reconstruct_full_nt, parity_to_str
 from chameleon_enum import Command, SlotNumber, Status, TagSenseType, TagSpecificType
 from chameleon_enum import ButtonPressFunction, ButtonType, MifareClassicDarksideStatus
@@ -2109,8 +2109,14 @@ class ChameleonCMD:
         return self.device.send_cmd_sync(Command.SEOS_WRITE_EMU_DATA, payload)
 
     @expect_response(Status.SUCCESS)
-    def seos_write_emu_keys(self, auth: bytes, privenc: bytes, privmac: bytes):
-        payload = auth + privenc + privmac
+    def seos_write_emu_keys(
+        self,
+        auth: bytes,
+        privenc: bytes,
+        privmac: bytes,
+        auth_write: Union[bytes, None] = None,
+    ):
+        payload = pack_seos_emu_keys(auth, privenc, privmac, auth_write)
         return self.device.send_cmd_sync(Command.SEOS_WRITE_EMU_KEYS, payload)
 
 

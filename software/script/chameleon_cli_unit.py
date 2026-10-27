@@ -56,6 +56,7 @@ from chameleon_enum import HIDFormat
 from chameleon_seos import (
     add_seos_alg_args,
     add_seos_gdf_args,
+    add_seos_write_key_arg,
     format_seos_eview,
     parse_seos_encr_alg,
     parse_seos_hash_alg,
@@ -11641,6 +11642,7 @@ class HFSeosKeys(SlotIndexArgsAndGoUnit, DeviceRequiredUnit):
             required=True,
             help="PrivMac key (16 bytes)",
         )
+        add_seos_write_key_arg(parser)
         return parser
 
     def on_exec(self, args: argparse.Namespace):
@@ -11676,4 +11678,17 @@ class HFSeosKeys(SlotIndexArgsAndGoUnit, DeviceRequiredUnit):
             )
             return
 
-        self.cmd.seos_write_emu_keys(auth=auth, privenc=privenc, privmac=privmac)
+        auth_write = None
+        if args.write is not None:
+            auth_write = bytes.fromhex(args.write)
+            if len(auth_write) != 16:
+                print(
+                    color_string(
+                        (CR, "Error: invalid write-auth key length. Accepts 16 bytes.")
+                    )
+                )
+                return
+
+        self.cmd.seos_write_emu_keys(
+            auth=auth, privenc=privenc, privmac=privmac, auth_write=auth_write
+        )

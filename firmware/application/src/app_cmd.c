@@ -1437,7 +1437,7 @@ static data_frame_tx_t *cmd_processor_seos_write_emu_data(uint16_t cmd, uint16_t
 }
 
 static data_frame_tx_t *cmd_processor_seos_write_emu_keys(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
-    if (length != 16 * 3) {
+    if (length != 16 * 3 && length != 16 * 4) {
         return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     }
     tag_data_buffer_t *buffer = get_buffer_by_tag_type(TAG_TYPE_SEOS);
@@ -1446,6 +1446,12 @@ static data_frame_tx_t *cmd_processor_seos_write_emu_keys(uint16_t cmd, uint16_t
     memcpy(info->authkey, data+ 0, 16);
     memcpy(info->privenc, data+16, 16);
     memcpy(info->privmac, data+32, 16);
+    if (length == 16 * 4) {
+        memcpy(info->authkey_write, data+48, 16);
+        info->writekey_magic = SEOS_WRITEKEY_MAGIC;
+    } else if (!seos_writekey_valid(info)) {
+        seos_apply_default_writekey(info);
+    }
 
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
 }
