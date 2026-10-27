@@ -55,6 +55,7 @@ from chameleon_enum import (
 from chameleon_enum import HIDFormat
 from chameleon_seos import (
     add_seos_alg_args,
+    add_seos_gdf_args,
     format_seos_eview,
     parse_seos_encr_alg,
     parse_seos_hash_alg,
@@ -11489,6 +11490,7 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
             help="Simulated card diversifier (1-16 bytes).",
         )
         add_seos_alg_args(parser)
+        add_seos_gdf_args(parser)
         return parser
 
     def on_exec(self, args: argparse.Namespace):
@@ -11520,6 +11522,8 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
             and args.diversifier is None
             and args.hash is None
             and args.encr is None
+            and args.gdf_oid is None
+            and args.gdf_div is None
             and change_requested is False
         ):
             print(color_string((CR, "Error: No changes were requested.")))
@@ -11565,6 +11569,36 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
             )
             return
 
+        gdf_oid = (
+            bytes.fromhex(args.gdf_oid) if args.gdf_oid else seos_data.get("gdf_oid")
+        )
+        gdf_diversifier = (
+            bytes.fromhex(args.gdf_div)
+            if args.gdf_div
+            else seos_data.get("gdf_diversifier")
+        )
+        if gdf_oid is not None and (len(gdf_oid) < 1 or len(gdf_oid) > 32):
+            print(
+                color_string((CR, "Error: invalid GDF OID length. Accepts 1-32 bytes."))
+            )
+            return
+        if gdf_diversifier is not None and (
+            len(gdf_diversifier) < 1 or len(gdf_diversifier) > 16
+        ):
+            print(
+                color_string(
+                    (CR, "Error: invalid GDF diversifier length. Accepts 1-16 bytes.")
+                )
+            )
+            return
+        if (gdf_oid is None) != (gdf_diversifier is None):
+            print(
+                color_string(
+                    (CR, "Error: GDF OID and diversifier must be set together.")
+                )
+            )
+            return
+
         self.cmd.seos_write_emu_data(
             data=data,
             oid=oid,
@@ -11572,6 +11606,8 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
             diversifier=diversifier,
             hash_alg=hash_alg,
             encr_alg=encr_alg,
+            gdf_oid=gdf_oid,
+            gdf_diversifier=gdf_diversifier,
         )
 
 

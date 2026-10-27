@@ -13,15 +13,21 @@ from chameleon_seos import (  # noqa: E402
     SEOS_ENCR_2K3DES,
     SEOS_ENCR_3K3DES,
     SEOS_ENCR_AES,
+    SEOS_FACTORY_ADF_OID,
+    SEOS_FACTORY_GDF_DIV,
+    SEOS_FACTORY_GDF_OID,
     SEOS_HASH_SHA1,
     SEOS_HASH_SHA256,
+    add_seos_gdf_args,
     build_seos_shill_authenticate,
     build_seos_shill_select_adf,
     format_seos_eview,
+    pack_seos_emu_data,
     parse_seos_encr_alg,
     parse_seos_hash_alg,
     seos_encr_alg_name,
     seos_hash_alg_name,
+    unpack_seos_emu_data,
 )
 
 
@@ -124,6 +130,72 @@ class TestSeosPrivacyShill(unittest.TestCase):
         self.assertEqual(body[3], 0x28)
         self.assertEqual(body[4:44], bytes(range(0x28)))
         self.assertEqual(len(body), 44)
+
+
+class TestSeosGdfRecord(unittest.TestCase):
+    def test_factory_gdf_is_distinct_from_adf(self):
+        self.assertNotEqual(SEOS_FACTORY_GDF_OID, SEOS_FACTORY_ADF_OID)
+        self.assertEqual(SEOS_FACTORY_GDF_OID, bytes.fromhex("03010709FFFFFFFFFF"))
+        self.assertEqual(SEOS_FACTORY_GDF_DIV, bytes.fromhex("00000000000000"))
+
+    def test_pack_unpack_roundtrip_includes_gdf(self):
+        packed = pack_seos_emu_data(
+            data=bytes.fromhex("0500"),
+            oid=SEOS_FACTORY_ADF_OID,
+            tag=bytes.fromhex("FF00"),
+            diversifier=bytes.fromhex("01020304050607"),
+            hash_alg=SEOS_HASH_SHA256,
+            encr_alg=SEOS_ENCR_AES,
+            gdf_oid=SEOS_FACTORY_GDF_OID,
+            gdf_diversifier=SEOS_FACTORY_GDF_DIV,
+        )
+        parsed = unpack_seos_emu_data(packed)
+        self.assertEqual(parsed["oid"], SEOS_FACTORY_ADF_OID)
+        self.assertEqual(parsed["gdf_oid"], SEOS_FACTORY_GDF_OID)
+        self.assertEqual(parsed["gdf_diversifier"], SEOS_FACTORY_GDF_DIV)
+        self.assertEqual(parsed["hash_alg"], SEOS_HASH_SHA256)
+        self.assertEqual(parsed["encr_alg"], SEOS_ENCR_AES)
+
+    def test_unpack_legacy_payload_has_no_gdf(self):
+        packed = pack_seos_emu_data(
+            data=bytes.fromhex("0500"),
+            oid=SEOS_FACTORY_ADF_OID,
+            tag=bytes.fromhex("FF00"),
+            diversifier=bytes.fromhex("01020304050607"),
+            hash_alg=SEOS_HASH_SHA256,
+            encr_alg=SEOS_ENCR_AES,
+        )
+        parsed = unpack_seos_emu_data(packed)
+        self.assertNotIn("gdf_oid", parsed)
+
+    def test_eview_prints_gdf_fields(self):
+        lines = format_seos_eview(
+            {
+                "data": bytes.fromhex("0500"),
+                "oid": SEOS_FACTORY_ADF_OID,
+                "tag": bytes.fromhex("FF00"),
+                "diversifier": bytes.fromhex("01020304050607"),
+                "hash_alg": SEOS_HASH_SHA256,
+                "encr_alg": SEOS_ENCR_AES,
+                "gdf_oid": SEOS_FACTORY_GDF_OID,
+                "gdf_diversifier": SEOS_FACTORY_GDF_DIV,
+            }
+        )
+        text = "\n".join(lines)
+        self.assertIn("GDF OID: 03010709FFFFFFFFFF", text)
+        self.assertIn("GDF Diversifier: 00000000000000", text)
+        self.assertIn("OID: 030107090000000000", text)
+
+    def test_eload_parser_accepts_gdf_fields(self):
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        add_seos_gdf_args(parser)
+        args = parser.parse_args(
+            ["--gdf-oid", "03010709FFFFFFFFFF", "--gdf-div", "00000000000000"]
+        )
+        self.assertEqual(args.gdf_oid, "03010709FFFFFFFFFF")
+        self.assertEqual(args.gdf_div, "00000000000000")
 
 
 if __name__ == "__main__":

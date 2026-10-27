@@ -1336,7 +1336,11 @@ static data_frame_tx_t *cmd_processor_seos_read_emu_data(uint16_t cmd, uint16_t 
     tag_data_buffer_t *buffer = get_buffer_by_tag_type(TAG_TYPE_SEOS);
     nfc_tag_seos_information_t *info = (nfc_tag_seos_information_t *)buffer->buffer;
 
-    uint8_t output[1+info->diversifier_len + 1+info->oid_len + 1+info->data_tag_len + 1+info->data_len + 2];
+    if (!seos_gdf_record_valid(info)) {
+        seos_apply_factory_gdf(info);
+    }
+
+    uint8_t output[1+info->diversifier_len + 1+info->oid_len + 1+info->data_tag_len + 1+info->data_len + 2 + 1+info->gdf_oid_len + 1+info->gdf_diversifier_len];
     uint16_t offset = 0;
 
     output[offset++] = info->data_len;
@@ -1358,7 +1362,15 @@ static data_frame_tx_t *cmd_processor_seos_read_emu_data(uint16_t cmd, uint16_t 
     output[offset++] = info->hash_alg;
     output[offset++] = info->encr_alg;
 
-    return data_frame_make(cmd, STATUS_SUCCESS, sizeof(output), output);
+    output[offset++] = info->gdf_oid_len;
+    memcpy(output+offset, info->gdf_oid, info->gdf_oid_len);
+    offset += info->gdf_oid_len;
+
+    output[offset++] = info->gdf_diversifier_len;
+    memcpy(output+offset, info->gdf_diversifier, info->gdf_diversifier_len);
+    offset += info->gdf_diversifier_len;
+
+    return data_frame_make(cmd, STATUS_SUCCESS, offset, output);
 }
 
 static data_frame_tx_t *cmd_processor_seos_write_emu_data(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
@@ -1394,8 +1406,32 @@ static data_frame_tx_t *cmd_processor_seos_write_emu_data(uint16_t cmd, uint16_t
     memcpy(info->diversifier, data+offset, len);
     offset += len;
 
+    if (offset + 2 > length) {
+        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+    }
     info->hash_alg = data[offset++];
     info->encr_alg = data[offset++];
+
+    if (offset < length) {
+        len = data[offset++];
+        if (len == 0 || len > NFC_TAG_SEOS_OID_MAX || offset + len > length) {
+            return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+        }
+        info->gdf_oid_len = len;
+        memcpy(info->gdf_oid, data+offset, len);
+        offset += len;
+
+        if (offset >= length) {
+            return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+        }
+        len = data[offset++];
+        if (len == 0 || len > NFC_TAG_SEOS_DIVERSIFIER_MAX || offset + len > length) {
+            return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+        }
+        info->gdf_diversifier_len = len;
+        memcpy(info->gdf_diversifier, data+offset, len);
+        info->gdf_magic = SEOS_GDF_LAYOUT_MAGIC;
+    }
 
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
 }

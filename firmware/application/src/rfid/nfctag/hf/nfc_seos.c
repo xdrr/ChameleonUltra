@@ -240,9 +240,31 @@ nfc_tag_14a_coll_res_reference_t *nfc_tag_seos_get_coll_res(void) {
     return &m_shadow_coll_res;
 }
 
+void seos_apply_factory_gdf(nfc_tag_seos_information_t *info) {
+    /* Distinct from the Zero-Key ADF OID so GDF SELECT is not an ADF replay. */
+    static const uint8_t DEFAULT_GDF_OID[] = {0x03, 0x01, 0x07, 0x09, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    static const uint8_t DEFAULT_GDF_DIV[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+    memset(info->gdf_oid, 0, sizeof(info->gdf_oid));
+    memset(info->gdf_diversifier, 0, sizeof(info->gdf_diversifier));
+    info->gdf_oid_len = sizeof(DEFAULT_GDF_OID);
+    memcpy(info->gdf_oid, DEFAULT_GDF_OID, info->gdf_oid_len);
+    info->gdf_diversifier_len = sizeof(DEFAULT_GDF_DIV);
+    memcpy(info->gdf_diversifier, DEFAULT_GDF_DIV, info->gdf_diversifier_len);
+    info->gdf_magic = SEOS_GDF_LAYOUT_MAGIC;
+}
+
+bool seos_gdf_record_valid(const nfc_tag_seos_information_t *info) {
+    return info->gdf_magic == SEOS_GDF_LAYOUT_MAGIC &&
+           info->gdf_oid_len > 0 && info->gdf_oid_len <= NFC_TAG_SEOS_OID_MAX &&
+           info->gdf_diversifier_len > 0 && info->gdf_diversifier_len <= NFC_TAG_SEOS_DIVERSIFIER_MAX;
+}
+
 /* Public SELECT DF reply used by both ADF and GDF: CD (algs) + 85 (IV||cryptogram) + 8E (CMAC).
  * Plaintext inside the cryptogram is OID 0x06 and diversifier 0xCF. */
-static bool seos_fill_select_df_response(uint8_t *apdu_status) {
+static bool seos_fill_select_df_response(uint8_t *apdu_status,
+                                         const uint8_t *oid, uint8_t oid_len,
+                                         const uint8_t *diversifier, uint8_t diversifier_len) {
     const uint8_t bs = block_size(m_tag_information->encr_alg);
     const uint8_t half_bs = bs >> 1;
 
@@ -261,14 +283,14 @@ static bool seos_fill_select_df_response(uint8_t *apdu_status) {
     memset(reply, 0, reply_len);
 
     reply[reply_idx++] = 0x06;
-    reply[reply_idx++] = m_tag_information->oid_len;
-    memcpy(reply + reply_idx, m_tag_information->oid, m_tag_information->oid_len);
-    reply_idx += m_tag_information->oid_len;
+    reply[reply_idx++] = oid_len;
+    memcpy(reply + reply_idx, oid, oid_len);
+    reply_idx += oid_len;
 
     reply[reply_idx++] = 0xCF;
-    reply[reply_idx++] = m_tag_information->diversifier_len;
-    memcpy(reply + reply_idx, m_tag_information->diversifier, m_tag_information->diversifier_len);
-    reply_idx += m_tag_information->diversifier_len;
+    reply[reply_idx++] = diversifier_len;
+    memcpy(reply + reply_idx, diversifier, diversifier_len);
+    reply_idx += diversifier_len;
 
     if (6 + bs + reply_len + 10 > NFC_14A_4_MAX_APDU) {
         NRF_LOG_ERROR("Seos: Select DF failed: Response too large for buffer.");
@@ -405,7 +427,12 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
             // GDF is 00 A5 07 .. with no ADF TLV. Same public SELECT DF
             // cryptogram as ADF (CD / 85 / 8E) using the configured OID.
             if (receivedCmd[2] == 0x07) {
-                seos_fill_select_df_response(apdu_status);
+                if (!seos_gdf_record_valid(m_tag_information)) {
+                    seos_apply_factory_gdf(m_tag_information);
+                }
+                seos_fill_select_df_response(apdu_status,
+                                             m_tag_information->gdf_oid, m_tag_information->gdf_oid_len,
+                                             m_tag_information->gdf_diversifier, m_tag_information->gdf_diversifier_len);
                 break;
             }
 
@@ -445,7 +472,9 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
             NRF_LOG_DEBUG("Seos: Selected OID? %d", selected_oid);
 
             if (selected_oid) {
-                seos_fill_select_df_response(apdu_status);
+                seos_fill_select_df_response(apdu_status,
+                                             m_tag_information->oid, m_tag_information->oid_len,
+                                             m_tag_information->diversifier, m_tag_information->diversifier_len);
             } else {
                 seos_fill_shill_select_adf(apdu_status);
             }
@@ -884,6 +913,9 @@ int nfc_tag_seos_data_loadcb(tag_specific_type_t type, tag_data_buffer_t *buffer
         return info_size;
     }
     m_tag_information = (nfc_tag_seos_information_t *)buffer->buffer;
+    if (!seos_gdf_record_valid(m_tag_information)) {
+        seos_apply_factory_gdf(m_tag_information);
+    }
     memcpy(session_uid, m_tag_information->res_coll.uid, sizeof(session_uid));
     seos_refresh_session();
 
@@ -951,6 +983,7 @@ bool nfc_tag_seos_data_factory(uint8_t slot, tag_specific_type_t tag_type) {
 
     info.encr_alg = SEOS_ENCRYPTION_AES;
     info.hash_alg = SEOS_HASHING_SHA256;
+    seos_apply_factory_gdf(&info);
 
     fds_slot_record_map_t map_info;
     get_fds_map_by_slot_sense_type_for_dump(slot, TAG_SENSE_HF, &map_info);

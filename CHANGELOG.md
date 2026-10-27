@@ -6,6 +6,7 @@ This project uses the changelog in accordance with [keepchangelog](http://keepac
  - SEOS emulator: randomize 4-byte 08 RID, RND.ICC, KEY.ICC and ADF IV on field reset; emulate GDF select with the public SELECT DF cryptogram; return 6A81 for PUT DATA
  - SEOS CLI: `hf seos eview` prints hash/encr algorithms and a flags line; `hf seos eload --hash/--encr` can set them
  - SEOS emulator: unmatched ADF OID and failed mutual-auth return a well-formed privacy shill instead of 6A82
+ - SEOS emulator: store a distinct Global DF OID/diversifier; `hf seos eload --gdf-oid/--gdf-div` and `eview` can load and show it
 
 ## [v2.3.0][2026-10-24]
  - Added Farpointe/Pyramid LF protocol support: read and emulate (FSK2a, RF/50)

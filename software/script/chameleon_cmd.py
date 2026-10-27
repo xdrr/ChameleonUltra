@@ -3,6 +3,7 @@ import ctypes
 from typing import Union
 
 import chameleon_com
+from chameleon_seos import pack_seos_emu_data, unpack_seos_emu_data
 from chameleon_utils import expect_response, reconstruct_full_nt, parity_to_str
 from chameleon_enum import Command, SlotNumber, Status, TagSenseType, TagSpecificType
 from chameleon_enum import ButtonPressFunction, ButtonType, MifareClassicDarksideStatus
@@ -2076,29 +2077,7 @@ class ChameleonCMD:
     def seos_read_emu_data(self):
         resp = self.device.send_cmd_sync(Command.SEOS_READ_EMU_DATA, None)
         if resp.status == Status.SUCCESS and len(resp.data) > 0:
-
-            def extract_next():
-                length = resp.data[0]
-                value = resp.data[1 : length + 1]
-                resp.data = resp.data[length + 1 :]
-                return value
-
-            data, oid, tag, diversifier = (
-                extract_next(),
-                extract_next(),
-                extract_next(),
-                extract_next(),
-            )
-            hash_alg, encr_alg = struct.unpack("!BB", resp.data)
-
-            resp.parsed = {
-                "data": data,
-                "oid": oid,
-                "tag": tag,
-                "diversifier": diversifier,
-                "hash_alg": hash_alg,
-                "encr_alg": encr_alg,
-            }
+            resp.parsed = unpack_seos_emu_data(resp.data)
         return resp
 
     @expect_response(Status.SUCCESS)
@@ -2110,14 +2089,18 @@ class ChameleonCMD:
         diversifier: bytes,
         hash_alg: int,
         encr_alg: int,
+        gdf_oid: Union[bytes, None] = None,
+        gdf_diversifier: Union[bytes, None] = None,
     ):
-        data = bytes([len(data)]) + data
-        oid = bytes([len(oid)]) + oid
-        tag = bytes([len(tag)]) + tag
-        diversifier = bytes([len(diversifier)]) + diversifier
-
-        payload = (
-            data + oid + tag + diversifier + struct.pack("!BB", hash_alg, encr_alg)
+        payload = pack_seos_emu_data(
+            data=data,
+            oid=oid,
+            tag=tag,
+            diversifier=diversifier,
+            hash_alg=hash_alg,
+            encr_alg=encr_alg,
+            gdf_oid=gdf_oid,
+            gdf_diversifier=gdf_diversifier,
         )
 
         if len(payload) > 4096:

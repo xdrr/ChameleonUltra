@@ -1,12 +1,18 @@
 """SEOS emulator helpers shared by the CLI (algorithm names and eview)."""
 
-from typing import Callable, Dict, Iterable, List, Mapping, Union
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Union
 
 SEOS_HASH_SHA1 = 0x06
 SEOS_HASH_SHA256 = 0x07
 SEOS_ENCR_2K3DES = 0x02
 SEOS_ENCR_3K3DES = 0x03
 SEOS_ENCR_AES = 0x09
+
+# Factory ADF is the public Zero-Key OID. Factory GDF is a distinct
+# research placeholder so 00 A5 07 does not replay ADF contents.
+SEOS_FACTORY_ADF_OID = bytes.fromhex("030107090000000000")
+SEOS_FACTORY_GDF_OID = bytes.fromhex("03010709FFFFFFFFFF")
+SEOS_FACTORY_GDF_DIV = bytes.fromhex("00000000000000")
 
 _HASH_BY_NAME = {
     "sha1": SEOS_HASH_SHA1,
@@ -80,6 +86,84 @@ def add_seos_alg_args(parser) -> None:
     )
 
 
+def add_seos_gdf_args(parser) -> None:
+    parser.add_argument(
+        "--gdf-oid",
+        type=str,
+        default=None,
+        metavar="<hex>",
+        help="Global DF OID (1-32 bytes). Distinct from the ADF OID.",
+    )
+    parser.add_argument(
+        "--gdf-div",
+        type=str,
+        default=None,
+        metavar="<hex>",
+        help="Global DF diversifier (1-16 bytes).",
+    )
+
+
+def _tlv_put(value: bytes) -> bytes:
+    return bytes([len(value)]) + value
+
+
+def _tlv_take(payload: bytes, offset: int) -> tuple:
+    if offset >= len(payload):
+        raise ValueError("Truncated SEOS emu payload")
+    length = payload[offset]
+    start = offset + 1
+    end = start + length
+    if end > len(payload):
+        raise ValueError("Truncated SEOS emu payload")
+    return payload[start:end], end
+
+
+def pack_seos_emu_data(
+    data: bytes,
+    oid: bytes,
+    tag: bytes,
+    diversifier: bytes,
+    hash_alg: int,
+    encr_alg: int,
+    gdf_oid: Optional[bytes] = None,
+    gdf_diversifier: Optional[bytes] = None,
+) -> bytes:
+    payload = (
+        _tlv_put(data)
+        + _tlv_put(oid)
+        + _tlv_put(tag)
+        + _tlv_put(diversifier)
+        + bytes([hash_alg & 0xFF, encr_alg & 0xFF])
+    )
+    if gdf_oid is not None and gdf_diversifier is not None:
+        payload += _tlv_put(gdf_oid) + _tlv_put(gdf_diversifier)
+    return payload
+
+
+def unpack_seos_emu_data(payload: bytes) -> Dict[str, Union[bytes, int]]:
+    data, offset = _tlv_take(payload, 0)
+    oid, offset = _tlv_take(payload, offset)
+    tag, offset = _tlv_take(payload, offset)
+    diversifier, offset = _tlv_take(payload, offset)
+    if offset + 2 > len(payload):
+        raise ValueError("Truncated SEOS emu payload")
+    parsed: Dict[str, Union[bytes, int]] = {
+        "data": data,
+        "oid": oid,
+        "tag": tag,
+        "diversifier": diversifier,
+        "hash_alg": payload[offset],
+        "encr_alg": payload[offset + 1],
+    }
+    offset += 2
+    if offset < len(payload):
+        gdf_oid, offset = _tlv_take(payload, offset)
+        gdf_diversifier, offset = _tlv_take(payload, offset)
+        parsed["gdf_oid"] = gdf_oid
+        parsed["gdf_diversifier"] = gdf_diversifier
+    return parsed
+
+
 SEOS_SHILL_SELECT_CRYPTOGRAM_LEN = 0x40
 SEOS_SHILL_SELECT_CMAC_LEN = 0x08
 SEOS_SHILL_AUTH_BODY_LEN = 0x28
@@ -116,8 +200,17 @@ def format_seos_eview(data: Dict[str, Union[bytes, int]]) -> List[str]:
         f"[=]         OID: {bytes(data['oid']).hex().upper()}",
         f"[=]         Tag: {bytes(data['tag']).hex().upper()}",
         f"[=] Diversifier: {bytes(data['diversifier']).hex().upper()}",
-        f"[=]        Hash: {hash_name} (0x{hash_alg:02X})",
-        f"[=]        Encr: {encr_name} (0x{encr_alg:02X})",
-        f"[=]       Flags: hash={hash_name} encr={encr_name}",
     ]
+    if "gdf_oid" in data:
+        lines.append(f"[=]     GDF OID: {bytes(data['gdf_oid']).hex().upper()}")
+        lines.append(
+            f"[=] GDF Diversifier: {bytes(data['gdf_diversifier']).hex().upper()}"
+        )
+    lines.extend(
+        [
+            f"[=]        Hash: {hash_name} (0x{hash_alg:02X})",
+            f"[=]        Encr: {encr_name} (0x{encr_alg:02X})",
+            f"[=]       Flags: hash={hash_name} encr={encr_name}",
+        ]
+    )
     return lines
