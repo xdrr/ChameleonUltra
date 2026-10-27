@@ -824,21 +824,49 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                 uint16_t tlv_idx = 0;
 
                 if (is_put) {
-                    /* PM3 UPDATE DATA plaintext is tag (2) || length || value. */
-                    if (cryptogram_length < 3) {
-                        NRF_LOG_ERROR("Seos: Update Data failed: Object too short.");
+                    /* PM3 sends tag||len||value when -t is set, or len||value
+                     * when the tag defaults to empty and we keep the stored tag. */
+                    uint8_t obj_tag[NFC_TAG_SEOS_DATA_TAG_MAX];
+                    uint8_t obj_tag_len = 0;
+                    const uint8_t *obj_val = NULL;
+                    uint8_t obj_len = 0;
+                    bool parsed = false;
+                    if (cryptogram_length >= 3) {
+                        uint8_t length = request[2];
+                        if (length > 0 && length <= NFC_TAG_SEOS_DATA_MAX &&
+                            (uint16_t)(3 + length) <= cryptogram_length) {
+                            memcpy(obj_tag, request, 2);
+                            obj_tag_len = 2;
+                            obj_val = request + 3;
+                            obj_len = length;
+                            parsed = true;
+                        }
+                    }
+                    if (!parsed && cryptogram_length >= 1) {
+                        uint8_t length = request[0];
+                        if (length > 0 && length <= NFC_TAG_SEOS_DATA_MAX &&
+                            (uint16_t)(1 + length) <= cryptogram_length) {
+                            if (m_tag_information->data_tag_len > 0 &&
+                                m_tag_information->data_tag_len <= NFC_TAG_SEOS_DATA_TAG_MAX) {
+                                memcpy(obj_tag, m_tag_information->data_tag, m_tag_information->data_tag_len);
+                                obj_tag_len = m_tag_information->data_tag_len;
+                            } else {
+                                obj_tag[0] = 0xFF;
+                                obj_tag[1] = 0x00;
+                                obj_tag_len = 2;
+                            }
+                            obj_val = request + 1;
+                            obj_len = length;
+                            parsed = true;
+                        }
+                    }
+                    if (!parsed || obj_val == NULL) {
+                        NRF_LOG_ERROR("Seos: Update Data failed: Invalid object.");
                         break;
                     }
-                    uint8_t obj_tag_len = 2;
-                    uint8_t obj_len = request[obj_tag_len];
-                    if (obj_len == 0 || obj_len > NFC_TAG_SEOS_DATA_MAX ||
-                        (uint16_t)(obj_tag_len + 1 + obj_len) > cryptogram_length) {
-                        NRF_LOG_ERROR("Seos: Update Data failed: Invalid object length.");
-                        break;
-                    }
-                    memcpy(m_tag_information->data_tag, request, obj_tag_len);
+                    memcpy(m_tag_information->data_tag, obj_tag, obj_tag_len);
                     m_tag_information->data_tag_len = obj_tag_len;
-                    memcpy(m_tag_information->data, request + obj_tag_len + 1, obj_len);
+                    memcpy(m_tag_information->data, obj_val, obj_len);
                     m_tag_information->data_len = obj_len;
                 } else {
                     //5c 02 ff 00

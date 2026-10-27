@@ -258,6 +258,11 @@ class TestSeosUpdateData(unittest.TestCase):
         with self.assertRaises(ValueError):
             seos_parse_put_object(bytes.fromhex("FF0005AABB"))
 
+    def test_parse_put_object_length_prefixed_uses_default_tag(self):
+        tag, value = seos_parse_put_object(bytes.fromhex("0412345678"))
+        self.assertEqual(tag, bytes.fromhex("FF00"))
+        self.assertEqual(value, bytes.fromhex("12345678"))
+
 
 class TestSeosSecureMessaging(unittest.TestCase):
     def test_sm_status_words(self):
