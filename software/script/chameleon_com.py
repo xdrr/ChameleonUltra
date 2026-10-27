@@ -76,6 +76,8 @@ class ChameleonCom:
         self.send_data_queue = queue.Queue()
         self.wait_response_map = {}
         self.event_closing = threading.Event()
+        self._io_lock = threading.Lock()
+        self._closed = False
 
     def isOpen(self) -> bool:
         """
@@ -138,9 +140,10 @@ class ChameleonCom:
             self.wait_response_map.clear()
             # Start a sub thread to process data
             self.event_closing.clear()
-            threading.Thread(target=self.thread_data_receive).start()
-            threading.Thread(target=self.thread_data_transfer).start()
-            threading.Thread(target=self.thread_check_timeout).start()
+            self._closed = False
+            threading.Thread(target=self.thread_data_receive, daemon=True).start()
+            threading.Thread(target=self.thread_data_transfer, daemon=True).start()
+            threading.Thread(target=self.thread_check_timeout, daemon=True).start()
         return self
 
     def check_open(self) -> None:
@@ -172,6 +175,9 @@ class ChameleonCom:
 
         :return:
         """
+        if self._closed:
+            return
+        self._closed = True
         self.event_closing.set()
         try:
             assert self.transport is not None
@@ -203,7 +209,8 @@ class ChameleonCom:
             if self.transport_type is TransportType.SERIAL:
                 try:
                     assert self.transport is not None
-                    data_bytes = bytearray(self.transport.read())
+                    with self._io_lock:
+                        data_bytes = bytearray(self.transport.read())
                 except Exception as e:
                     if not self.event_closing.is_set():
                         print(f"Serial Error {e}, thread for receiver exit.")
@@ -229,6 +236,12 @@ class ChameleonCom:
                             print("Data frame no sof byte.")
                             data_position = 0
                             data_buffer.clear()
+                            if self.transport_type is TransportType.SERIAL:
+                                try:
+                                    with self._io_lock:
+                                        self.transport.reset_input_buffer()
+                                except Exception:
+                                    pass
                             continue
                     if data_position == struct.calcsize("!B"):
                         if data_buffer[data_position] != self.lrc_calc(
@@ -355,7 +368,8 @@ class ChameleonCom:
                 try:
                     assert self.transport is not None
                     # send to device
-                    self.transport.write(task["frame"])
+                    with self._io_lock:
+                        self.transport.write(task["frame"])
                 except Exception as e:
                     print(f"Serial Error {e}, thread for transfer exit.")
                     self.close()

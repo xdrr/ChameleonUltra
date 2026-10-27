@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import atexit
 import sys
 import traceback
 import chameleon_com
@@ -216,6 +217,7 @@ def main(argv=None) -> int:
     chameleon_cli_unit.check_tools()
 
     cli = ChameleonCLI()
+    atexit.register(cli.device_com.close)
     if args.command:
         for command in args.command:
             try:

@@ -2072,33 +2072,33 @@ class ChameleonCMD:
         data = struct.pack("!H", duration)
         return self.device.send_cmd_sync(Command.SET_LONG_PRESS_THRESHOLD, data)
 
+    @expect_response(Status.SUCCESS)
     def seos_read_emu_data(self):
         resp = self.device.send_cmd_sync(Command.SEOS_READ_EMU_DATA, None)
-        resp.parsed = {}
+        if resp.status == Status.SUCCESS and len(resp.data) > 0:
 
-        def extract_next():
-            length = resp.data[0]
-            value = resp.data[1 : length + 1]
-            resp.data = resp.data[length + 1 :]
-            return value
+            def extract_next():
+                length = resp.data[0]
+                value = resp.data[1 : length + 1]
+                resp.data = resp.data[length + 1 :]
+                return value
 
-        data, oid, tag, diversifier = (
-            extract_next(),
-            extract_next(),
-            extract_next(),
-            extract_next(),
-        )
-        hash_alg, encr_alg = struct.unpack("!BB", resp.data)
+            data, oid, tag, diversifier = (
+                extract_next(),
+                extract_next(),
+                extract_next(),
+                extract_next(),
+            )
+            hash_alg, encr_alg = struct.unpack("!BB", resp.data)
 
-        resp.parsed = {
-            "data": data,
-            "oid": oid,
-            "tag": tag,
-            "diversifier": diversifier,
-            "hash_alg": hash_alg,
-            "encr_alg": encr_alg,
-        }
-
+            resp.parsed = {
+                "data": data,
+                "oid": oid,
+                "tag": tag,
+                "diversifier": diversifier,
+                "hash_alg": hash_alg,
+                "encr_alg": encr_alg,
+            }
         return resp
 
     @expect_response(Status.SUCCESS)
