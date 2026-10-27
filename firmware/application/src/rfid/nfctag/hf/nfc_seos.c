@@ -240,6 +240,76 @@ nfc_tag_14a_coll_res_reference_t *nfc_tag_seos_get_coll_res(void) {
     return &m_shadow_coll_res;
 }
 
+/* Public SELECT DF reply used by both ADF and GDF: CD (algs) + 85 (IV||cryptogram) + 8E (CMAC).
+ * Plaintext inside the cryptogram is OID 0x06 and diversifier 0xCF. */
+static bool seos_fill_select_df_response(uint8_t *apdu_status) {
+    const uint8_t bs = block_size(m_tag_information->encr_alg);
+    const uint8_t half_bs = bs >> 1;
+
+    uint8_t iv_rand[16];
+    seos_rng_fill(iv_rand, half_bs);
+    if (!generate_cmac(m_tag_information->privmac, iv_rand, half_bs, work_buffer_a, m_tag_information->encr_alg)) {
+        NRF_LOG_ERROR("Seos: Select DF failed: Failed to create IV CMAC.");
+        return false;
+    }
+    memcpy(cryptogram_iv, iv_rand, half_bs);
+    memcpy(cryptogram_iv + half_bs, work_buffer_a, half_bs);
+
+    const uint8_t reply_len = 0x30;
+    uint8_t reply_idx = 0;
+    uint8_t *reply = work_buffer_a;
+    memset(reply, 0, reply_len);
+
+    reply[reply_idx++] = 0x06;
+    reply[reply_idx++] = m_tag_information->oid_len;
+    memcpy(reply + reply_idx, m_tag_information->oid, m_tag_information->oid_len);
+    reply_idx += m_tag_information->oid_len;
+
+    reply[reply_idx++] = 0xCF;
+    reply[reply_idx++] = m_tag_information->diversifier_len;
+    memcpy(reply + reply_idx, m_tag_information->diversifier, m_tag_information->diversifier_len);
+    reply_idx += m_tag_information->diversifier_len;
+
+    if (6 + bs + reply_len + 10 > NFC_14A_4_MAX_APDU) {
+        NRF_LOG_ERROR("Seos: Select DF failed: Response too large for buffer.");
+        return false;
+    }
+
+    uint16_t tlv_idx = 0;
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = 0xCD;
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = 0x02;
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = m_tag_information->encr_alg;
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = m_tag_information->hash_alg;
+
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = 0x85;
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = reply_len + bs;
+    memcpy(m_tcl_session_state.m_resp_buf + tlv_idx, cryptogram_iv, bs);
+    tlv_idx += bs;
+
+    if (!generate_cryptogram(m_tag_information->privenc, true, reply, reply_len, m_tcl_session_state.m_resp_buf + tlv_idx, m_tag_information->encr_alg)) {
+        NRF_LOG_ERROR("Seos: Select DF failed: Failed to create reply cryptogram.");
+        return false;
+    }
+    tlv_idx += reply_len;
+
+    const uint8_t cmac_size = 8;
+    uint8_t *cmac = work_buffer_a;
+    if (!generate_cmac(m_tag_information->privmac, m_tcl_session_state.m_resp_buf, tlv_idx, cmac, m_tag_information->encr_alg)) {
+        NRF_LOG_ERROR("Seos: Select DF failed: Failed to create reply CMAC.");
+        return false;
+    }
+
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = 0x8E;
+    m_tcl_session_state.m_resp_buf[tlv_idx++] = cmac_size;
+    memcpy(m_tcl_session_state.m_resp_buf + tlv_idx, cmac, cmac_size);
+    tlv_idx += cmac_size;
+
+    m_tcl_session_state.m_resp_len = tlv_idx;
+    apdu_status[0] = 0x90;
+    apdu_status[1] = 0x00;
+    return true;
+}
+
 /* ------------------------------------------------------------------ */
 /*  State handler (called from NFCT ISR on each received frame)        */
 /* ------------------------------------------------------------------ */
@@ -293,23 +363,25 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
         }
         break;
 
-        case 0xA5: {  // SELECT OID
-            // Global DF is 00 A5 07 .. (no ADF TLV). Until GDF content is
-            // implemented, return a defined SW rather than "file not found".
-            if (receivedCmd[2] == 0x07 || receivedCmd[4] == 0x00) {
+        case 0xA5: {  // SELECT OID / Global DF
+            // GDF is 00 A5 07 .. with no ADF TLV. Same public SELECT DF
+            // cryptogram as ADF (CD / 85 / 8E) using the configured OID.
+            if (receivedCmd[2] == 0x07) {
+                seos_fill_select_df_response(apdu_status);
+                break;
+            }
+
+            if (receivedCmd[4] == 0x00) {
                 apdu_status[0] = 0x6A;
                 apdu_status[1] = 0x81;
                 break;
             }
 
-            // This is specific to Seos
-            // Should be a TLV structure with the OID stored in tag 0x06
             uint8_t received_tlv_len = receivedCmd[4];
             uint8_t *received_tlv = &receivedCmd[5];
 
             bool selected_oid = false;
 
-            // Check all requested OIDs and see if we support any
             uint8_t tlv_offset = 0;
             while (tlv_offset + 2 <= received_tlv_len) {
 
@@ -335,77 +407,8 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
             NRF_LOG_DEBUG("Seos: Selected OID? %d", selected_oid);
 
             if (selected_oid) {
-                // Synthesized IV: half a block of random data followed by half of the CMAC of that data.
-                // generate_cmac() zeros the shared cryptogram_iv, so keep the random half local.
-                uint8_t iv_rand[16];
-                seos_rng_fill(iv_rand, half_bs);
-                if (!generate_cmac(m_tag_information->privmac, iv_rand, half_bs, work_buffer_a, m_tag_information->encr_alg)) {
-                   NRF_LOG_ERROR("Seos: Select ADF failed: Failed to create IV CMAC.");
-                   break;
-                }
-                memcpy(cryptogram_iv, iv_rand, half_bs);
-                memcpy(cryptogram_iv + half_bs, work_buffer_a, half_bs);
-
-                // Always exactly 0x30 bytes in length
-                const uint8_t reply_len = 0x30;
-                uint8_t reply_idx = 0;
-                uint8_t *reply = work_buffer_a;
-                memset(reply, 0, reply_len);
-
-                reply[reply_idx++] = 0x06; // Tag: selected OID
-                reply[reply_idx++] = m_tag_information->oid_len;
-                memcpy(reply + reply_idx, m_tag_information->oid, m_tag_information->oid_len);
-                reply_idx += m_tag_information->oid_len;
-
-                reply[reply_idx++] = 0xCF; // Tag: diversifier
-                reply[reply_idx++] = m_tag_information->diversifier_len;
-                memcpy(reply + reply_idx, m_tag_information->diversifier, m_tag_information->diversifier_len);
-                reply_idx += m_tag_information->diversifier_len;
-
-                uint16_t tlv_idx = 0;
-
-                // Pre-flight: 6 fixed bytes + bs (IV) + reply_len (cryptogram) + 10 (CMAC tag+len+data)
-                if (6 + bs + reply_len + 10 > NFC_14A_4_MAX_APDU) {
-                    NRF_LOG_ERROR("Seos: Select ADF failed: Response too large for buffer.");
-                    break;
-                }
-
-                m_tcl_session_state.m_resp_buf[tlv_idx++] = 0xCD; // Tag: cryptography type
-                m_tcl_session_state.m_resp_buf[tlv_idx++] = 0x02; // Length
-                m_tcl_session_state.m_resp_buf[tlv_idx++] = m_tag_information->encr_alg;
-                m_tcl_session_state.m_resp_buf[tlv_idx++] = m_tag_information->hash_alg;
-
-                m_tcl_session_state.m_resp_buf[tlv_idx++] = 0x85; // Tag: cryptogram
-                m_tcl_session_state.m_resp_buf[tlv_idx++] = reply_len + bs; // Length
-                memcpy(m_tcl_session_state.m_resp_buf + tlv_idx, cryptogram_iv, bs);
-                tlv_idx += bs;
-                
-                // Generate cryptogram directly into response buffer
-                if (!generate_cryptogram(m_tag_information->privenc, true, reply, reply_len, m_tcl_session_state.m_resp_buf + tlv_idx, m_tag_information->encr_alg)) {
-                    NRF_LOG_ERROR("Select ADF failed: Failed to create reply cryptogram.");
-                    break;
-                }
-                tlv_idx += reply_len;
-
-                // Always an 8-byte CMAC
-                const uint8_t cmac_size = 8;
-                uint8_t *cmac = work_buffer_a;
-                if (!generate_cmac(m_tag_information->privmac, m_tcl_session_state.m_resp_buf, tlv_idx, cmac, m_tag_information->encr_alg)) {
-                    NRF_LOG_ERROR("Seos: Select ADF failed: Failed to create reply CMAC.");
-                    break;
-                }
-
-                m_tcl_session_state.m_resp_buf[tlv_idx++] = 0x8E; // Tag: CMAC
-                m_tcl_session_state.m_resp_buf[tlv_idx++] = cmac_size; // Length
-                memcpy(m_tcl_session_state.m_resp_buf + tlv_idx, cmac, cmac_size);
-                tlv_idx += cmac_size;
-
-                m_tcl_session_state.m_resp_len = tlv_idx;
-
-                // Set status code to Success
-                apdu_status[0] = 0x90;
-                apdu_status[1] = 0x00;
-            } // No error message here because readers may request multiple OIDs before reaching ours
+                seos_fill_select_df_response(apdu_status);
+            }
         }
         break;
 
