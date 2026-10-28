@@ -14,6 +14,7 @@ SEOS_ENCR_AES = 0x09
 SEOS_FACTORY_ADF_OID = bytes.fromhex("030107090000000000")
 SEOS_FACTORY_GDF_OID = bytes.fromhex("03010709FFFFFFFFFF")
 SEOS_FACTORY_GDF_DIV = bytes.fromhex("00000000000000")
+SEOS_MOBILE_ADMIN_AID = bytes.fromhex("A000000382002D000101")
 
 _HASH_BY_NAME = {
     "sha1": SEOS_HASH_SHA1,
@@ -129,6 +130,11 @@ def pack_seos_emu_data(
     gdf_oid: Optional[bytes] = None,
     gdf_diversifier: Optional[bytes] = None,
     extras: Optional[Iterable[tuple]] = None,
+    extra_aid: Optional[bytes] = None,
+    adf2_oid: Optional[bytes] = None,
+    adf2_diversifier: Optional[bytes] = None,
+    adf2_tag: Optional[bytes] = None,
+    adf2_data: Optional[bytes] = None,
 ) -> bytes:
     payload = (
         _tlv_put(data)
@@ -139,11 +145,20 @@ def pack_seos_emu_data(
     )
     if gdf_oid is not None and gdf_diversifier is not None:
         payload += _tlv_put(gdf_oid) + _tlv_put(gdf_diversifier)
-        if extras is not None:
-            extra_list = list(extras)
+        has_adf2 = extra_aid is not None or adf2_oid is not None
+        if extras is not None or has_adf2:
+            extra_list = list(extras) if extras is not None else []
             payload += bytes([len(extra_list)])
             for extra_tag, extra_data in extra_list:
                 payload += _tlv_put(bytes(extra_tag)) + _tlv_put(bytes(extra_data))
+            if has_adf2:
+                payload += (
+                    _tlv_put(extra_aid or b"")
+                    + _tlv_put(adf2_oid or b"")
+                    + _tlv_put(adf2_diversifier or b"")
+                    + _tlv_put(adf2_tag or b"")
+                    + _tlv_put(adf2_data or b"")
+                )
     return payload
 
 
@@ -177,6 +192,17 @@ def unpack_seos_emu_data(payload: bytes) -> Dict[str, Union[bytes, int, List]]:
             extra_data, offset = _tlv_take(payload, offset)
             extras.append((extra_tag, extra_data))
         parsed["extras"] = extras
+    if offset < len(payload):
+        extra_aid, offset = _tlv_take(payload, offset)
+        adf2_oid, offset = _tlv_take(payload, offset)
+        adf2_diversifier, offset = _tlv_take(payload, offset)
+        adf2_tag, offset = _tlv_take(payload, offset)
+        adf2_data, offset = _tlv_take(payload, offset)
+        parsed["extra_aid"] = extra_aid
+        parsed["adf2_oid"] = adf2_oid
+        parsed["adf2_diversifier"] = adf2_diversifier
+        parsed["adf2_tag"] = adf2_tag
+        parsed["adf2_data"] = adf2_data
     return parsed
 
 
@@ -229,6 +255,19 @@ def format_seos_eview(data: Dict[str, Union[bytes, int]]) -> List[str]:
                 f"[=]      Object: {bytes(extra_tag).hex().upper()} "
                 f"{bytes(extra_data).hex().upper()}"
             )
+    extra_aid = data.get("extra_aid")
+    if extra_aid:
+        lines.append(f"[=]   Extra AID: {bytes(extra_aid).hex().upper()}")
+    if data.get("adf2_oid"):
+        lines.append(f"[=]    ADF2 OID: {bytes(data['adf2_oid']).hex().upper()}")
+        if data.get("adf2_diversifier"):
+            lines.append(
+                f"[=] ADF2 Diversifier: {bytes(data['adf2_diversifier']).hex().upper()}"
+            )
+        if data.get("adf2_tag"):
+            lines.append(f"[=]    ADF2 Tag: {bytes(data['adf2_tag']).hex().upper()}")
+        if data.get("adf2_data"):
+            lines.append(f"[=]   ADF2 Data: {bytes(data['adf2_data']).hex().upper()}")
     lines.extend(
         [
             f"[=]        Hash: {hash_name} (0x{hash_alg:02X})",
@@ -371,6 +410,44 @@ def add_seos_object_arg(parser) -> None:
         default=None,
         metavar="<tag:hex>",
         help="Extra ADF object (repeatable), e.g. FF41:DEADBEEF.",
+    )
+
+
+def add_seos_adf2_args(parser) -> None:
+    parser.add_argument(
+        "--aid",
+        type=str,
+        default=None,
+        metavar="<hex>",
+        help="Extra SELECT FILE AID (e.g. Mobile Admin A000000382002D000101).",
+    )
+    parser.add_argument(
+        "--adf2-oid",
+        type=str,
+        default=None,
+        metavar="<hex>",
+        help="Second ADF OID. SELECT of this OID uses ADF2 keys and object.",
+    )
+    parser.add_argument(
+        "--adf2-div",
+        type=str,
+        default=None,
+        metavar="<hex>",
+        help="Second ADF diversifier.",
+    )
+    parser.add_argument(
+        "--adf2-data",
+        type=str,
+        default=None,
+        metavar="<hex>",
+        help="Second ADF object value.",
+    )
+    parser.add_argument(
+        "--adf2-tag",
+        type=str,
+        default=None,
+        metavar="<hex>",
+        help="Second ADF object tag (default FF00).",
     )
 
 

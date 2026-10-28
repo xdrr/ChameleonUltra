@@ -2092,6 +2092,11 @@ class ChameleonCMD:
         gdf_oid: Union[bytes, None] = None,
         gdf_diversifier: Union[bytes, None] = None,
         extras=None,
+        extra_aid: Union[bytes, None] = None,
+        adf2_oid: Union[bytes, None] = None,
+        adf2_diversifier: Union[bytes, None] = None,
+        adf2_tag: Union[bytes, None] = None,
+        adf2_data: Union[bytes, None] = None,
     ):
         payload = pack_seos_emu_data(
             data=data,
@@ -2103,6 +2108,11 @@ class ChameleonCMD:
             gdf_oid=gdf_oid,
             gdf_diversifier=gdf_diversifier,
             extras=extras,
+            extra_aid=extra_aid,
+            adf2_oid=adf2_oid,
+            adf2_diversifier=adf2_diversifier,
+            adf2_tag=adf2_tag,
+            adf2_data=adf2_data,
         )
 
         if len(payload) > 4096:

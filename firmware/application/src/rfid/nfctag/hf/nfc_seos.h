@@ -11,8 +11,10 @@
 #define SEOS_GDF_LAYOUT_MAGIC 0x31464447u  /* "GDF1" — appended after v1 key material */
 #define SEOS_WRITEKEY_MAGIC   0x574B5931u  /* "WKY1" — ADF write master after GDF */
 #define SEOS_OBJECTS_MAGIC    0x314A424Fu  /* "OBJ1" — extra ADF objects after write key */
+#define SEOS_ADF_MAGIC        0x31464441u  /* "ADF1" — extra AID + second ADF after objects */
 #define SEOS_KEYSLOT_WRITE    0x02
 #define NFC_TAG_SEOS_EXTRA_MAX 3
+#define NFC_TAG_SEOS_AID_MAX  16
 
 typedef struct __attribute__((packed)) {
     uint8_t tag[NFC_TAG_SEOS_DATA_TAG_MAX];
@@ -69,6 +71,25 @@ typedef struct __attribute__((packed)) {
     uint32_t objects_magic;
     uint8_t extra_count;
     nfc_tag_seos_object_t extra[NFC_TAG_SEOS_EXTRA_MAX];
+
+    /* Extra SELECT FILE AID and a second ADF. Appended after objects so
+     * older slots keep a valid prefix; loadcb zeros them when magic is
+     * missing. ADF2 keeps its own OID, diversifier, keys, and object. */
+    uint32_t adf_magic;
+    uint8_t extra_aid[NFC_TAG_SEOS_AID_MAX];
+    uint8_t extra_aid_len;
+    uint8_t adf2_oid[NFC_TAG_SEOS_OID_MAX];
+    uint8_t adf2_oid_len;
+    uint8_t adf2_diversifier[NFC_TAG_SEOS_DIVERSIFIER_MAX];
+    uint8_t adf2_diversifier_len;
+    uint8_t adf2_authkey[16];
+    uint8_t adf2_privenc[16];
+    uint8_t adf2_privmac[16];
+    uint8_t adf2_authkey_write[16];
+    uint8_t adf2_tag[NFC_TAG_SEOS_DATA_TAG_MAX];
+    uint8_t adf2_tag_len;
+    uint8_t adf2_data[NFC_TAG_SEOS_DATA_MAX];
+    uint8_t adf2_data_len;
 }
 nfc_tag_seos_information_t;
 
@@ -85,6 +106,8 @@ void seos_apply_default_writekey(nfc_tag_seos_information_t *info);
 bool seos_writekey_valid(const nfc_tag_seos_information_t *info);
 void seos_apply_empty_objects(nfc_tag_seos_information_t *info);
 bool seos_objects_valid(const nfc_tag_seos_information_t *info);
+void seos_apply_empty_adf2(nfc_tag_seos_information_t *info);
+bool seos_adf2_valid(const nfc_tag_seos_information_t *info);
 const uint8_t *seos_auth_master_for_keyslot(const nfc_tag_seos_information_t *info, uint8_t keyslot);
 
 #endif

@@ -262,6 +262,7 @@ static uint8_t KEY_IFD[16] = { 0x00 };
 static uint8_t diver_encr_key[16] = { 0x00 };
 static uint8_t diver_cmac_key[16] = { 0x00 };
 static bool seos_sm_active = false;
+static uint8_t seos_adf_index = 0;
 static uint8_t seos_pending[NFC_14A_4_MAX_APDU];
 static uint16_t seos_pending_len = 0;
 
@@ -309,6 +310,7 @@ static void seos_refresh_session(void) {
     memset(diver_encr_key, 0, sizeof(diver_encr_key));
     memset(diver_cmac_key, 0, sizeof(diver_cmac_key));
     seos_sm_active = false;
+    seos_adf_index = 0;
     seos_pending_clear();
 
     if (m_tag_information == NULL) {
@@ -415,6 +417,39 @@ bool seos_objects_valid(const nfc_tag_seos_information_t *info) {
            info->extra_count <= NFC_TAG_SEOS_EXTRA_MAX;
 }
 
+void seos_apply_empty_adf2(nfc_tag_seos_information_t *info) {
+    info->adf_magic = SEOS_ADF_MAGIC;
+    info->extra_aid_len = 0;
+    memset(info->extra_aid, 0, sizeof(info->extra_aid));
+    info->adf2_oid_len = 0;
+    memset(info->adf2_oid, 0, sizeof(info->adf2_oid));
+    info->adf2_diversifier_len = 0;
+    memset(info->adf2_diversifier, 0, sizeof(info->adf2_diversifier));
+    memcpy(info->adf2_authkey, info->authkey, 16);
+    memcpy(info->adf2_privenc, info->privenc, 16);
+    memcpy(info->adf2_privmac, info->privmac, 16);
+    memcpy(info->adf2_authkey_write, info->authkey_write, 16);
+    info->adf2_tag_len = 0;
+    memset(info->adf2_tag, 0, sizeof(info->adf2_tag));
+    info->adf2_data_len = 0;
+    memset(info->adf2_data, 0, sizeof(info->adf2_data));
+}
+
+bool seos_adf2_valid(const nfc_tag_seos_information_t *info) {
+    return info->adf_magic == SEOS_ADF_MAGIC &&
+           info->extra_aid_len <= NFC_TAG_SEOS_AID_MAX &&
+           info->adf2_oid_len <= NFC_TAG_SEOS_OID_MAX &&
+           info->adf2_diversifier_len <= NFC_TAG_SEOS_DIVERSIFIER_MAX &&
+           info->adf2_tag_len <= NFC_TAG_SEOS_DATA_TAG_MAX;
+}
+
+static bool seos_adf2_selected(void) {
+    return seos_adf_index == 1 &&
+           m_tag_information != NULL &&
+           seos_adf2_valid(m_tag_information) &&
+           m_tag_information->adf2_oid_len > 0;
+}
+
 static bool seos_tag_eq(const uint8_t *a, uint8_t a_len, const uint8_t *b, uint8_t b_len) {
     return a_len == b_len && a_len > 0 && memcmp(a, b, a_len) == 0;
 }
@@ -422,6 +457,16 @@ static bool seos_tag_eq(const uint8_t *a, uint8_t a_len, const uint8_t *b, uint8
 static bool seos_find_object(const nfc_tag_seos_information_t *info,
                              const uint8_t *tag, uint8_t tag_len,
                              const uint8_t **data_out, uint8_t *data_len_out) {
+    if (seos_adf2_selected()) {
+        if (info->adf2_data_len > 0 &&
+            (seos_tag_eq(info->adf2_tag, info->adf2_tag_len, tag, tag_len) ||
+             info->adf2_tag_len == 0)) {
+            *data_out = info->adf2_data;
+            *data_len_out = info->adf2_data_len;
+            return true;
+        }
+        return false;
+    }
     if (seos_tag_eq(info->data_tag, info->data_tag_len, tag, tag_len)) {
         *data_out = info->data;
         *data_len_out = info->data_len;
@@ -443,6 +488,14 @@ static bool seos_store_named_object(nfc_tag_seos_information_t *info,
     if (tag_len == 0 || tag_len > NFC_TAG_SEOS_DATA_TAG_MAX ||
         value_len == 0 || value_len > NFC_TAG_SEOS_DATA_MAX) {
         return false;
+    }
+    if (seos_adf2_selected()) {
+        memcpy(info->adf2_tag, tag, tag_len);
+        info->adf2_tag_len = tag_len;
+        memcpy(info->adf2_data, value, value_len);
+        info->adf2_data_len = value_len;
+        info->adf_magic = SEOS_ADF_MAGIC;
+        return true;
     }
     if (seos_tag_eq(info->data_tag, info->data_tag_len, tag, tag_len) ||
         info->data_tag_len == 0) {
@@ -540,23 +593,48 @@ static bool seos_parse_requested_tags(const uint8_t *data, uint16_t data_len,
 }
 
 const uint8_t *seos_auth_master_for_keyslot(const nfc_tag_seos_information_t *info, uint8_t keyslot) {
+    if (seos_adf2_selected()) {
+        if (keyslot == SEOS_KEYSLOT_WRITE) {
+            return info->adf2_authkey_write;
+        }
+        return info->adf2_authkey;
+    }
     if (keyslot == SEOS_KEYSLOT_WRITE) {
         return info->authkey_write;
     }
     return info->authkey;
 }
 
+static const uint8_t *seos_active_oid(uint8_t *len) {
+    if (seos_adf2_selected()) {
+        *len = m_tag_information->adf2_oid_len;
+        return m_tag_information->adf2_oid;
+    }
+    *len = m_tag_information->oid_len;
+    return m_tag_information->oid;
+}
+
+static const uint8_t *seos_active_div(uint8_t *len) {
+    if (seos_adf2_selected()) {
+        *len = m_tag_information->adf2_diversifier_len;
+        return m_tag_information->adf2_diversifier;
+    }
+    *len = m_tag_information->diversifier_len;
+    return m_tag_information->diversifier;
+}
+
 /* Public SELECT DF reply used by both ADF and GDF: CD (algs) + 85 (IV||cryptogram) + 8E (CMAC).
  * Plaintext inside the cryptogram is OID 0x06 and diversifier 0xCF. */
 static bool seos_fill_select_df_response(uint8_t *apdu_status,
                                          const uint8_t *oid, uint8_t oid_len,
-                                         const uint8_t *diversifier, uint8_t diversifier_len) {
+                                         const uint8_t *diversifier, uint8_t diversifier_len,
+                                         const uint8_t *privenc, const uint8_t *privmac) {
     const uint8_t bs = block_size(m_tag_information->encr_alg);
     const uint8_t half_bs = bs >> 1;
 
     uint8_t iv_rand[16];
     seos_rng_fill(iv_rand, half_bs);
-    if (!generate_cmac(m_tag_information->privmac, iv_rand, half_bs, work_buffer_a, m_tag_information->encr_alg)) {
+    if (!generate_cmac((uint8_t *)privmac, iv_rand, half_bs, work_buffer_a, m_tag_information->encr_alg)) {
         NRF_LOG_ERROR("Seos: Select DF failed: Failed to create IV CMAC.");
         return false;
     }
@@ -594,7 +672,7 @@ static bool seos_fill_select_df_response(uint8_t *apdu_status,
     memcpy(m_tcl_session_state.m_resp_buf + tlv_idx, cryptogram_iv, bs);
     tlv_idx += bs;
 
-    if (!generate_cryptogram(m_tag_information->privenc, true, reply, reply_len, m_tcl_session_state.m_resp_buf + tlv_idx, m_tag_information->encr_alg)) {
+    if (!generate_cryptogram((uint8_t *)privenc, true, reply, reply_len, m_tcl_session_state.m_resp_buf + tlv_idx, m_tag_information->encr_alg)) {
         NRF_LOG_ERROR("Seos: Select DF failed: Failed to create reply cryptogram.");
         return false;
     }
@@ -602,7 +680,7 @@ static bool seos_fill_select_df_response(uint8_t *apdu_status,
 
     const uint8_t cmac_size = 8;
     uint8_t *cmac = work_buffer_a;
-    if (!generate_cmac(m_tag_information->privmac, m_tcl_session_state.m_resp_buf, tlv_idx, cmac, m_tag_information->encr_alg)) {
+    if (!generate_cmac((uint8_t *)privmac, m_tcl_session_state.m_resp_buf, tlv_idx, cmac, m_tag_information->encr_alg)) {
         NRF_LOG_ERROR("Seos: Select DF failed: Failed to create reply CMAC.");
         return false;
     }
@@ -686,7 +764,11 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
             uint8_t aid_len = receivedCmd[4];
             uint8_t *aid = &receivedCmd[5];
 
-            if ((aid_len == sizeof(SEOS_AID)) && (memcmp(SEOS_AID, aid, sizeof(SEOS_AID)) == 0)) { // Evaluate the AID sent by the Reader to the AID supplied
+            bool extra_aid = seos_adf2_valid(m_tag_information) &&
+                             m_tag_information->extra_aid_len == aid_len &&
+                             aid_len > 0 &&
+                             memcmp(m_tag_information->extra_aid, aid, aid_len) == 0;
+            if (((aid_len == sizeof(SEOS_AID)) && (memcmp(SEOS_AID, aid, sizeof(SEOS_AID)) == 0)) || extra_aid) {
                 // Format as TLV and acknowledge
                 /*
                 6F 0C
@@ -718,7 +800,8 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                 }
                 seos_fill_select_df_response(apdu_status,
                                              m_tag_information->gdf_oid, m_tag_information->gdf_oid_len,
-                                             m_tag_information->gdf_diversifier, m_tag_information->gdf_diversifier_len);
+                                             m_tag_information->gdf_diversifier, m_tag_information->gdf_diversifier_len,
+                                             m_tag_information->privenc, m_tag_information->privmac);
                 break;
             }
 
@@ -732,6 +815,7 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
             uint8_t *received_tlv = &receivedCmd[5];
 
             bool selected_oid = false;
+            bool selected_adf2 = false;
 
             uint8_t tlv_offset = 0;
             while (tlv_offset + 2 <= received_tlv_len) {
@@ -752,15 +836,30 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                         selected_oid = true;
                         break;
                     }
+                    if (seos_adf2_valid(m_tag_information) &&
+                        length == m_tag_information->adf2_oid_len &&
+                        length > 0 &&
+                        memcmp(value, m_tag_information->adf2_oid, length) == 0) {
+                        selected_adf2 = true;
+                        break;
+                    }
                 }
                 tlv_offset += length;
             }
-            NRF_LOG_DEBUG("Seos: Selected OID? %d", selected_oid);
+            NRF_LOG_DEBUG("Seos: Selected OID? %d adf2? %d", selected_oid, selected_adf2);
 
             if (selected_oid) {
+                seos_adf_index = 0;
                 seos_fill_select_df_response(apdu_status,
                                              m_tag_information->oid, m_tag_information->oid_len,
-                                             m_tag_information->diversifier, m_tag_information->diversifier_len);
+                                             m_tag_information->diversifier, m_tag_information->diversifier_len,
+                                             m_tag_information->privenc, m_tag_information->privmac);
+            } else if (selected_adf2) {
+                seos_adf_index = 1;
+                seos_fill_select_df_response(apdu_status,
+                                             m_tag_information->adf2_oid, m_tag_information->adf2_oid_len,
+                                             m_tag_information->adf2_diversifier, m_tag_information->adf2_diversifier_len,
+                                             m_tag_information->adf2_privenc, m_tag_information->adf2_privmac);
             } else {
                 seos_fill_shill_select_adf(apdu_status);
             }
@@ -812,9 +911,13 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
 
                 uint8_t keyslot = receivedCmd[3]; // APDU P2 byte
                 const uint8_t *auth_master = seos_auth_master_for_keyslot(m_tag_information, keyslot);
+                uint8_t active_oid_len = 0;
+                uint8_t active_div_len = 0;
+                const uint8_t *active_oid = seos_active_oid(&active_oid_len);
+                const uint8_t *active_div = seos_active_div(&active_div_len);
 
-                seos_kdf(true, (uint8_t *)auth_master, keyslot, work_buffer_a, m_tag_information->oid, m_tag_information->oid_len, m_tag_information->diversifier, m_tag_information->diversifier_len, diver_encr_key, m_tag_information->encr_alg, m_tag_information->hash_alg);
-                seos_kdf(false, (uint8_t *)auth_master, keyslot, work_buffer_a, m_tag_information->oid, m_tag_information->oid_len, m_tag_information->diversifier, m_tag_information->diversifier_len, diver_cmac_key, m_tag_information->encr_alg, m_tag_information->hash_alg);
+                seos_kdf(true, (uint8_t *)auth_master, keyslot, work_buffer_a, (uint8_t *)active_oid, active_oid_len, (uint8_t *)active_div, active_div_len, diver_encr_key, m_tag_information->encr_alg, m_tag_information->hash_alg);
+                seos_kdf(false, (uint8_t *)auth_master, keyslot, work_buffer_a, (uint8_t *)active_oid, active_oid_len, (uint8_t *)active_div, active_div_len, diver_cmac_key, m_tag_information->encr_alg, m_tag_information->hash_alg);
 
                 // Verify CMAC (last 8 bytes)
                 uint8_t request_len = received_tlv_len - 8;
@@ -1332,6 +1435,9 @@ int nfc_tag_seos_data_loadcb(tag_specific_type_t type, tag_data_buffer_t *buffer
     if (!seos_objects_valid(m_tag_information)) {
         seos_apply_empty_objects(m_tag_information);
     }
+    if (!seos_adf2_valid(m_tag_information)) {
+        seos_apply_empty_adf2(m_tag_information);
+    }
     memcpy(session_uid, m_tag_information->res_coll.uid, sizeof(session_uid));
     seos_refresh_session();
 
@@ -1402,6 +1508,7 @@ bool nfc_tag_seos_data_factory(uint8_t slot, tag_specific_type_t tag_type) {
     seos_apply_factory_gdf(&info);
     seos_apply_default_writekey(&info);
     seos_apply_empty_objects(&info);
+    seos_apply_empty_adf2(&info);
 
     fds_slot_record_map_t map_info;
     get_fds_map_by_slot_sense_type_for_dump(slot, TAG_SENSE_HF, &map_info);

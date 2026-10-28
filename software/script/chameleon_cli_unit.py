@@ -56,6 +56,7 @@ from chameleon_enum import HIDFormat
 from chameleon_seos import (
     add_seos_alg_args,
     add_seos_gdf_args,
+    add_seos_adf2_args,
     add_seos_object_arg,
     add_seos_write_key_arg,
     format_seos_eview,
@@ -11495,6 +11496,7 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
         add_seos_alg_args(parser)
         add_seos_gdf_args(parser)
         add_seos_object_arg(parser)
+        add_seos_adf2_args(parser)
         return parser
 
     def on_exec(self, args: argparse.Namespace):
@@ -11529,6 +11531,11 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
             and args.gdf_oid is None
             and args.gdf_div is None
             and args.object is None
+            and args.aid is None
+            and args.adf2_oid is None
+            and args.adf2_div is None
+            and args.adf2_data is None
+            and args.adf2_tag is None
             and change_requested is False
         ):
             print(color_string((CR, "Error: No changes were requested.")))
@@ -11614,6 +11621,66 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
                 print(color_string((CR, f"Error: {err}")))
                 return
 
+        extra_aid = (
+            bytes.fromhex(args.aid) if args.aid else seos_data.get("extra_aid")
+        )
+        adf2_oid = (
+            bytes.fromhex(args.adf2_oid)
+            if args.adf2_oid
+            else seos_data.get("adf2_oid")
+        )
+        adf2_diversifier = (
+            bytes.fromhex(args.adf2_div)
+            if args.adf2_div
+            else seos_data.get("adf2_diversifier")
+        )
+        adf2_tag = (
+            bytes.fromhex(args.adf2_tag)
+            if args.adf2_tag
+            else seos_data.get("adf2_tag")
+        )
+        adf2_data = (
+            bytes.fromhex(args.adf2_data)
+            if args.adf2_data
+            else seos_data.get("adf2_data")
+        )
+        if extra_aid is not None and (len(extra_aid) < 1 or len(extra_aid) > 16):
+            print(
+                color_string((CR, "Error: invalid extra AID length. Accepts 1-16 bytes."))
+            )
+            return
+        if adf2_oid is not None and (len(adf2_oid) < 1 or len(adf2_oid) > 32):
+            print(
+                color_string((CR, "Error: invalid ADF2 OID length. Accepts 1-32 bytes."))
+            )
+            return
+        if adf2_diversifier is not None and (
+            len(adf2_diversifier) < 1 or len(adf2_diversifier) > 16
+        ):
+            print(
+                color_string(
+                    (CR, "Error: invalid ADF2 diversifier length. Accepts 1-16 bytes.")
+                )
+            )
+            return
+        if adf2_tag is not None and (len(adf2_tag) < 1 or len(adf2_tag) > 2):
+            print(color_string((CR, "Error: invalid ADF2 tag length. Accepts 1-2 bytes.")))
+            return
+        if adf2_data is not None and (len(adf2_data) < 1 or len(adf2_data) > 255):
+            print(
+                color_string((CR, "Error: invalid ADF2 data length. Accepts 1-255 bytes."))
+            )
+            return
+        if adf2_data is not None and adf2_tag is None:
+            adf2_tag = bytes.fromhex("FF00")
+        if (adf2_oid is None) != (adf2_diversifier is None):
+            print(
+                color_string(
+                    (CR, "Error: ADF2 OID and diversifier must be set together.")
+                )
+            )
+            return
+
         self.cmd.seos_write_emu_data(
             data=data,
             oid=oid,
@@ -11624,6 +11691,11 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
             gdf_oid=gdf_oid,
             gdf_diversifier=gdf_diversifier,
             extras=extras,
+            extra_aid=extra_aid,
+            adf2_oid=adf2_oid,
+            adf2_diversifier=adf2_diversifier,
+            adf2_tag=adf2_tag,
+            adf2_data=adf2_data,
         )
 
 

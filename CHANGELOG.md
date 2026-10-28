@@ -14,6 +14,7 @@ This project uses the changelog in accordance with [keepchangelog](http://keepac
  - SEOS emulator: store extra ADF objects; GET DATA accepts `4D` lists and answers unknown tags with empty success; `hf seos eload --object`
  - SEOS emulator: GET RESPONSE with a non-zero wrong Le returns `6C xx` and keeps the pending body
  - SEOS emulator: 2K3DES-CBC + SHA-1 session keys (`eload --encr 02 --hash 06`)
+ - SEOS emulator: extra SELECT FILE AID and a second ADF (`eload --aid/--adf2-oid/--adf2-div/--adf2-data`)
 
 ## [v2.3.0][2026-10-24]
  - Added Farpointe/Pyramid LF protocol support: read and emulate (FSK2a, RF/50)

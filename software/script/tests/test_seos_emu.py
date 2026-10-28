@@ -16,11 +16,13 @@ from chameleon_seos import (  # noqa: E402
     SEOS_FACTORY_ADF_OID,
     SEOS_FACTORY_GDF_DIV,
     SEOS_FACTORY_GDF_OID,
+    SEOS_MOBILE_ADMIN_AID,
     SEOS_HASH_SHA1,
     SEOS_HASH_SHA256,
     SEOS_KEYSLOT_WRITE,
     SEOS_SW_SM_INCORRECT,
     SEOS_SW_SM_MISSING,
+    add_seos_adf2_args,
     add_seos_gdf_args,
     add_seos_write_key_arg,
     build_seos_shill_authenticate,
@@ -473,6 +475,78 @@ class TestSeosMultiTag(unittest.TestCase):
         )
         text = "\n".join(lines)
         self.assertIn("Object: FF41 DEAD", text)
+
+
+class TestSeosMultiAdf(unittest.TestCase):
+    def test_mobile_admin_aid_is_public(self):
+        self.assertEqual(SEOS_MOBILE_ADMIN_AID, bytes.fromhex("A000000382002D000101"))
+
+    def test_pack_unpack_extra_aid_and_adf2(self):
+        packed = pack_seos_emu_data(
+            data=bytes.fromhex("0500"),
+            oid=SEOS_FACTORY_ADF_OID,
+            tag=bytes.fromhex("FF00"),
+            diversifier=bytes.fromhex("01020304050607"),
+            hash_alg=SEOS_HASH_SHA256,
+            encr_alg=SEOS_ENCR_AES,
+            gdf_oid=SEOS_FACTORY_GDF_OID,
+            gdf_diversifier=SEOS_FACTORY_GDF_DIV,
+            extra_aid=SEOS_MOBILE_ADMIN_AID,
+            adf2_oid=bytes.fromhex("03010709AABBCC"),
+            adf2_diversifier=bytes.fromhex("11223344556677"),
+            adf2_tag=bytes.fromhex("FF00"),
+            adf2_data=bytes.fromhex("AABB"),
+        )
+        parsed = unpack_seos_emu_data(packed)
+        self.assertEqual(parsed["extra_aid"], SEOS_MOBILE_ADMIN_AID)
+        self.assertEqual(parsed["adf2_oid"], bytes.fromhex("03010709AABBCC"))
+        self.assertEqual(parsed["adf2_diversifier"], bytes.fromhex("11223344556677"))
+        self.assertEqual(parsed["adf2_tag"], bytes.fromhex("FF00"))
+        self.assertEqual(parsed["adf2_data"], bytes.fromhex("AABB"))
+
+    def test_eview_prints_extra_aid_and_adf2(self):
+        lines = format_seos_eview(
+            {
+                "data": bytes.fromhex("0500"),
+                "oid": SEOS_FACTORY_ADF_OID,
+                "tag": bytes.fromhex("FF00"),
+                "diversifier": bytes.fromhex("01020304050607"),
+                "hash_alg": SEOS_HASH_SHA256,
+                "encr_alg": SEOS_ENCR_AES,
+                "extra_aid": SEOS_MOBILE_ADMIN_AID,
+                "adf2_oid": bytes.fromhex("03010709AABBCC"),
+                "adf2_diversifier": bytes.fromhex("11223344556677"),
+                "adf2_tag": bytes.fromhex("FF00"),
+                "adf2_data": bytes.fromhex("AABB"),
+            }
+        )
+        text = "\n".join(lines)
+        self.assertIn("Extra AID: A000000382002D000101", text)
+        self.assertIn("ADF2 OID: 03010709AABBCC", text)
+        self.assertIn("ADF2 Data: AABB", text)
+
+    def test_eload_parser_accepts_adf2_fields(self):
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        add_seos_adf2_args(parser)
+        args = parser.parse_args(
+            [
+                "--aid",
+                "A000000382002D000101",
+                "--adf2-oid",
+                "03010709AABBCC",
+                "--adf2-div",
+                "11223344556677",
+                "--adf2-data",
+                "AABB",
+                "--adf2-tag",
+                "FF00",
+            ]
+        )
+        self.assertEqual(args.aid, "A000000382002D000101")
+        self.assertEqual(args.adf2_oid, "03010709AABBCC")
+        self.assertEqual(args.adf2_data, "AABB")
 
 
 if __name__ == "__main__":
