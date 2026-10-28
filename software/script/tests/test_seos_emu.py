@@ -45,6 +45,7 @@ from chameleon_seos import (  # noqa: E402
     seos_get_response_apdu,
     seos_iso7816_continue,
     seos_iso7816_leftover_retry,
+    seos_pacs_collect_rapdu,
     seos_round_to_next,
     seos_ins_needs_wtx,
     seos_pcb_is_wtx,
@@ -484,6 +485,42 @@ class TestSeosGetResponse(unittest.TestCase):
         self.assertEqual(chunk, b"")
         self.assertEqual(rest, b"")
         self.assertEqual(sw, 0x6A86)
+
+    def test_pacs_collect_unwraps_255_byte_object(self):
+        plaintext = bytes.fromhex("FF00") + bytes([0xFF]) + bytes([0xAA] * 255)
+        cases = (
+            (SEOS_ENCR_2K3DES, SEOS_HASH_SHA1),
+            (SEOS_ENCR_AES, SEOS_HASH_SHA256),
+        )
+        for encr, hash_alg in cases:
+            with self.subTest(encr=encr):
+                enc, mac = seos_session_keys(
+                    key_ifd=bytes.fromhex("c7ced5dce3eaf1f8ff060d141b222930"),
+                    key_icc=bytes.fromhex("e7eef5fc030a11181f262d343b424950"),
+                    rnd_icc=bytes.fromhex("777e858c939aa1a8"),
+                    rnd_ifd=bytes.fromhex("a7aeb5bcc3cad1d8"),
+                    encr_alg=encr,
+                    hash_alg=hash_alg,
+                )
+                wrapped = seos_wrap_get_data_rapdu(
+                    enc_key=enc,
+                    mac_key=mac,
+                    rnd_icc=bytes.fromhex("777e858c939aa1a8"),
+                    rnd_ifd=bytes.fromhex("a7aeb5bcc3cad1d8"),
+                    plaintext=plaintext,
+                    encr_alg=encr,
+                )
+                self.assertGreater(len(wrapped), 251)
+                collected = seos_pacs_collect_rapdu(wrapped, max_frame=253)
+                recovered = seos_unwrap_get_data_rapdu(
+                    enc_key=enc,
+                    mac_key=mac,
+                    rnd_icc=bytes.fromhex("777e858c939aa1a8"),
+                    rnd_ifd=bytes.fromhex("a7aeb5bcc3cad1d8"),
+                    body=collected,
+                    encr_alg=encr,
+                )
+                self.assertEqual(recovered, plaintext)
 
     def test_wrong_le_retry_then_delivers_pending(self):
         leftover = bytes(range(20))

@@ -664,6 +664,24 @@ def seos_iso7816_leftover_retry(
     return seos_iso7816_continue(rest, retry, max_frame)
 
 
+def seos_pacs_collect_rapdu(body: bytes, max_frame: int) -> bytes:
+    """Concatenate leftover GET DATA the way hf seos pacs does.
+
+    First T=CL frame, then 00 C0 with Le from 61 xx (or 6C xx).
+    FSCI=8 INF is 253 bytes.
+    """
+    first, rest, sw = seos_iso7816_split_response(body, max_frame)
+    collected = bytearray(first)
+    while (sw >> 8) in (0x61, 0x6C):
+        chunk, rest, sw = seos_iso7816_continue(rest, sw & 0xFF, max_frame)
+        collected.extend(chunk)
+        if sw == 0x9000:
+            break
+    if sw != 0x9000:
+        raise ValueError(f"leftover ended with {sw:04X}")
+    return bytes(collected)
+
+
 # ISO14443-4 WTX for slow SEOS APDUs (GET/UPDATE DATA). Firmware must
 # send S(WTX) in the first FDT window and finish the APDU after the
 # reader's WTX ACK, when FRAMEDELAYMAX can be opened to advertised FWT.
@@ -984,10 +1002,12 @@ def seos_sm_mac_objects(body: bytes) -> tuple:
         header = 2
         if length & 0x80:
             extra = length & 0x7F
-            if extra != 1 or offset + 2 + extra > len(body):
+            if extra < 1 or extra > 2 or offset + 2 + extra > len(body):
                 raise ValueError("incorrect")
-            length = body[offset + 2]
-            header = 3
+            length = 0
+            for i in range(extra):
+                length = (length << 8) | body[offset + 2 + i]
+            header = 2 + extra
         end = offset + header + length
         if end > len(body):
             raise ValueError("incorrect")
