@@ -413,6 +413,16 @@ static bool seos_read_ber_tag(const uint8_t *data, uint16_t end, uint16_t *offse
 
 #define SEOS_MAX_REQUESTED_TAGS 4
 
+static uint8_t seos_put_ber_len(uint8_t *out, uint8_t n) {
+    if (n < 0x80) {
+        out[0] = n;
+        return 1;
+    }
+    out[0] = 0x81;
+    out[1] = n;
+    return 2;
+}
+
 static bool seos_parse_requested_tags(const uint8_t *data, uint16_t data_len,
                                       uint8_t tags[][NFC_TAG_SEOS_DATA_TAG_MAX],
                                       uint8_t *tag_lens, uint8_t *tag_count) {
@@ -1121,13 +1131,14 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                             break;
                         }
 
-                        if (2 + reply_len + 4 + 2 + recvd_cmac_length > NFC_14A_4_MAX_APDU) {
+                        uint8_t len_octets = (reply_len < 0x80) ? 1 : 2;
+                        if (1 + len_octets + reply_len + 4 + 2 + recvd_cmac_length > NFC_14A_4_MAX_APDU) {
                             NRF_LOG_ERROR("Seos: Get Data failed: Response too large for buffer.");
                             break;
                         }
 
                         m_tcl_session_state.m_resp_buf[tlv_idx++] = 0x85;
-                        m_tcl_session_state.m_resp_buf[tlv_idx++] = reply_len;
+                        tlv_idx += seos_put_ber_len(m_tcl_session_state.m_resp_buf + tlv_idx, reply_len);
                         memcpy(m_tcl_session_state.m_resp_buf + tlv_idx, reply_cryptogram, reply_len);
                         tlv_idx += reply_len;
                     }

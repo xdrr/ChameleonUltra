@@ -373,6 +373,15 @@ def add_seos_object_arg(parser) -> None:
     )
 
 
+def seos_ber_length(n: int) -> bytes:
+    """ISO7816 BER length. Values 128-255 need the 0x81 long form."""
+    if n < 0 or n > 255:
+        raise ValueError("BER length out of range")
+    if n < 128:
+        return bytes([n])
+    return bytes([0x81, n])
+
+
 def seos_iblock_reassemble(parts: Iterable[bytes]) -> bytes:
     """Concatenate ISO14443-4 chained I-block INF payloads into one APDU."""
     chunks = list(parts)

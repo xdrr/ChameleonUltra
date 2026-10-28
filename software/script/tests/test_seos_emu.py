@@ -34,6 +34,7 @@ from chameleon_seos import (  # noqa: E402
     seos_encr_alg_name,
     seos_hash_alg_name,
     seos_parse_put_object,
+    seos_ber_length,
     seos_collect_objects,
     seos_iblock_reassemble,
     seos_iso7816_continue,
@@ -286,6 +287,16 @@ class TestSeosSecureMessaging(unittest.TestCase):
         with self.assertRaises(ValueError) as err:
             seos_sm_mac_objects(bytes.fromhex("8510" + "11" * 16 + "9700"))
         self.assertEqual(str(err.exception), "missing")
+
+
+class TestSeosBerLength(unittest.TestCase):
+    def test_short_form_under_128(self):
+        self.assertEqual(seos_ber_length(16), bytes([16]))
+        self.assertEqual(seos_ber_length(127), bytes([127]))
+
+    def test_long_form_for_large_cryptogram(self):
+        self.assertEqual(seos_ber_length(224), bytes([0x81, 224]))
+        self.assertEqual(seos_ber_length(255), bytes([0x81, 255]))
 
 
 class TestSeosIBlockReassembly(unittest.TestCase):
