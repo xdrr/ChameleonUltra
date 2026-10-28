@@ -46,6 +46,16 @@ from chameleon_seos import (  # noqa: E402
     seos_iso7816_continue,
     seos_iso7816_leftover_retry,
     seos_round_to_next,
+    seos_ins_needs_wtx,
+    seos_pcb_is_wtx,
+    seos_wtx_on_iblock,
+    seos_wtx_on_sblock,
+    seos_wtx_process_on_ack,
+    SEOS_WTX_ECHO_WTX,
+    SEOS_WTX_PROCESS,
+    SEOS_WTX_SEND_IBLOCK,
+    SEOS_WTX_SEND_WTX,
+    SEOS_WTX_WAIT,
     seos_iso7816_more_sw,
     seos_iso7816_retry_le,
     seos_iso7816_split_response,
@@ -382,18 +392,6 @@ class TestSeosBerLength(unittest.TestCase):
         self.assertEqual(seos_ber_length(272), bytes([0x82, 0x01, 0x10]))
 
 
-class TestSeosRoundToNext(unittest.TestCase):
-    def test_255_byte_object_pads_past_uint8(self):
-        # tag(2)+len(1)+255 = 258, AES block 16 → 272, not a uint8 wrap
-        self.assertEqual(seos_round_to_next(258, 16), 272)
-        self.assertEqual(seos_round_to_next(258, 8), 264)
-
-    def test_small_and_aligned_lengths(self):
-        self.assertEqual(seos_round_to_next(5, 16), 16)
-        self.assertEqual(seos_round_to_next(16, 16), 16)
-        self.assertEqual(seos_round_to_next(0, 16), 0)
-
-
 class TestSeosSessionKeys(unittest.TestCase):
     def test_sha1_2k3des_matches_flipper_vector(self):
         enc, mac = seos_session_keys(
@@ -498,6 +496,61 @@ class TestSeosGetResponse(unittest.TestCase):
         self.assertEqual(chunk, leftover)
         self.assertEqual(rest, b"")
         self.assertEqual(sw, 0x9000)
+
+
+class TestSeosRoundToNext(unittest.TestCase):
+    def test_255_byte_object_pads_past_uint8(self):
+        # tag(2)+len(1)+255 = 258, AES block 16 → 272, not a uint8 wrap
+        self.assertEqual(seos_round_to_next(258, 16), 272)
+        self.assertEqual(seos_round_to_next(258, 8), 264)
+
+    def test_small_and_aligned_lengths(self):
+        self.assertEqual(seos_round_to_next(5, 16), 16)
+        self.assertEqual(seos_round_to_next(16, 16), 16)
+        self.assertEqual(seos_round_to_next(0, 16), 0)
+
+
+class TestSeosWtxDeferral(unittest.TestCase):
+    def test_get_and_update_data_need_wtx(self):
+        self.assertTrue(seos_ins_needs_wtx(0xCB))
+        self.assertTrue(seos_ins_needs_wtx(0xDA))
+        self.assertTrue(seos_ins_needs_wtx(0xDB))
+
+    def test_fast_ins_do_not_need_wtx(self):
+        for ins in (0xA4, 0xA5, 0x87, 0xC0):
+            self.assertFalse(seos_ins_needs_wtx(ins), ins)
+
+    def test_iblock_defers_slow_ins_and_processes_fast_ins(self):
+        self.assertEqual(seos_wtx_on_iblock(0xCB), SEOS_WTX_SEND_WTX)
+        self.assertEqual(seos_wtx_on_iblock(0xA4), SEOS_WTX_PROCESS)
+        self.assertEqual(seos_wtx_on_iblock(0xC0), SEOS_WTX_PROCESS)
+
+    def test_sblock_ack_does_not_run_crypto(self):
+        self.assertFalse(seos_wtx_process_on_ack())
+        self.assertEqual(
+            seos_wtx_on_sblock(waiting_ack=True, response_ready=False),
+            SEOS_WTX_WAIT,
+        )
+
+    def test_sblock_ack_sends_iblock_only_when_ready(self):
+        self.assertEqual(
+            seos_wtx_on_sblock(waiting_ack=True, response_ready=True),
+            SEOS_WTX_SEND_IBLOCK,
+        )
+        self.assertEqual(
+            seos_wtx_on_sblock(waiting_ack=True, response_ready=False),
+            SEOS_WTX_WAIT,
+        )
+        self.assertEqual(
+            seos_wtx_on_sblock(waiting_ack=False, response_ready=False),
+            SEOS_WTX_ECHO_WTX,
+        )
+
+    def test_pcb_recognizes_wtx_with_and_without_cid(self):
+        self.assertTrue(seos_pcb_is_wtx(0xF2))
+        self.assertTrue(seos_pcb_is_wtx(0xFA))
+        self.assertFalse(seos_pcb_is_wtx(0x02))
+        self.assertFalse(seos_pcb_is_wtx(0x0A))
 
 
 class TestSeosGetDataWrap(unittest.TestCase):

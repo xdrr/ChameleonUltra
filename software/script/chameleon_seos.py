@@ -664,6 +664,57 @@ def seos_iso7816_leftover_retry(
     return seos_iso7816_continue(rest, retry, max_frame)
 
 
+# ISO14443-4 WTX for slow SEOS APDUs (GET/UPDATE DATA). Firmware must
+# send S(WTX) in the first FDT window and finish the APDU after the
+# reader's WTX ACK, when FRAMEDELAYMAX can be opened to advertised FWT.
+SEOS_WTX_PROCESS = "process"
+SEOS_WTX_SEND_WTX = "send_wtx"
+SEOS_WTX_SEND_IBLOCK = "send_iblock"
+SEOS_WTX_WAIT = "wait"
+SEOS_WTX_ECHO_WTX = "echo_wtx"
+SEOS_INS_GET_DATA = 0xCB
+SEOS_INS_PUT_DATA = 0xDA
+SEOS_INS_UPDATE_DATA = 0xDB
+
+
+def seos_ins_needs_wtx(ins: int, encr_alg: Optional[int] = None) -> bool:
+    return ins in (SEOS_INS_GET_DATA, SEOS_INS_PUT_DATA, SEOS_INS_UPDATE_DATA)
+
+
+def seos_pcb_is_wtx(pcb: int) -> bool:
+    return (pcb & 0xF2) == 0xF2
+
+
+def seos_wtx_on_iblock(ins: int, encr_alg: Optional[int] = None) -> str:
+    if seos_ins_needs_wtx(ins, encr_alg):
+        return SEOS_WTX_SEND_WTX
+    return SEOS_WTX_PROCESS
+
+
+def seos_wtx_process_on_ack() -> bool:
+    """WTX ACK only records the grant. Crypto stays on the main loop.
+
+    Software 2K3DES of a leftover GET DATA overruns the NFCT ISR and
+    prevents the keep-alive WTX timer from running.
+    """
+    return False
+
+
+def seos_wtx_on_sblock(waiting_ack: bool, response_ready: bool = False) -> str:
+    """PICC-originated WTX: the PCD echo is an ACK, not a new request.
+
+    Crypto runs on the main loop. Do not immediately send another WTX
+    when the I-block is not ready — that ISR storm starves the loop.
+    """
+    if waiting_ack:
+        if response_ready:
+            return SEOS_WTX_SEND_IBLOCK
+        if seos_wtx_process_on_ack():
+            return SEOS_WTX_PROCESS
+        return SEOS_WTX_WAIT
+    return SEOS_WTX_ECHO_WTX
+
+
 def _seos_block_size(encr_alg: int) -> int:
     return 8 if encr_alg == SEOS_ENCR_2K3DES else 16
 
@@ -717,15 +768,38 @@ def _openssl_des_ede_cbc(key: bytes, data: bytes, decrypt: bool = False) -> byte
     return proc.stdout
 
 
+def _openssl_aes_cbc(key: bytes, data: bytes, decrypt: bool = False) -> bytes:
+    import subprocess
+
+    args = [
+        "openssl",
+        "enc",
+        "-aes-128-cbc",
+        "-K",
+        bytes(key[:16]).hex(),
+        "-iv",
+        "00" * 16,
+        "-nopad",
+    ]
+    if decrypt:
+        args.append("-d")
+    proc = subprocess.run(args, input=data, capture_output=True, check=True)
+    return proc.stdout
+
+
 def seos_encrypt_cbc(key: bytes, data: bytes, encr_alg: int) -> bytes:
+    if encr_alg == SEOS_ENCR_AES:
+        return _openssl_aes_cbc(key, data)
     if encr_alg != SEOS_ENCR_2K3DES:
-        raise ValueError("host wrap only implements 2K3DES")
+        raise ValueError("host wrap only implements AES and 2K3DES")
     return _openssl_des_ede_cbc(key, data)
 
 
 def seos_decrypt_cbc(key: bytes, data: bytes, encr_alg: int) -> bytes:
+    if encr_alg == SEOS_ENCR_AES:
+        return _openssl_aes_cbc(key, data, decrypt=True)
     if encr_alg != SEOS_ENCR_2K3DES:
-        raise ValueError("host wrap only implements 2K3DES")
+        raise ValueError("host wrap only implements AES and 2K3DES")
     return _openssl_des_ede_cbc(key, data, decrypt=True)
 
 
@@ -769,8 +843,28 @@ def seos_des_cmac(key: bytes, data: bytes) -> bytes:
 
 
 def seos_cmac8(key: bytes, data: bytes, encr_alg: int) -> bytes:
+    if encr_alg == SEOS_ENCR_AES:
+        import subprocess
+
+        proc = subprocess.run(
+            [
+                "openssl",
+                "dgst",
+                "-mac",
+                "CMAC",
+                "-macopt",
+                "cipher:aes-128-cbc",
+                "-macopt",
+                f"hexkey:{bytes(key[:16]).hex()}",
+                "-binary",
+            ],
+            input=data,
+            capture_output=True,
+            check=True,
+        )
+        return proc.stdout[:8]
     if encr_alg != SEOS_ENCR_2K3DES:
-        raise ValueError("host wrap only implements 2K3DES")
+        raise ValueError("host wrap only implements AES and 2K3DES")
     return seos_des_cmac(key, data)[:8]
 
 

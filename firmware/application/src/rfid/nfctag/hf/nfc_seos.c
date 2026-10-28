@@ -15,6 +15,7 @@
 #include "fds_util.h"
 #include "nrf_log.h"
 #include "nrf_drv_rng.h"
+#include "app_timer.h"
 
 #include <nrf_crypto_aes.h>
 #include <nrf_crypto_hash.h>
@@ -264,11 +265,24 @@ static bool seos_sm_active = false;
 static uint8_t seos_adf_index = 0;
 static uint8_t seos_pending[NFC_14A_4_MAX_APDU];
 static uint16_t seos_pending_len = 0;
+static volatile bool seos_wtx_waiting = false;
+static volatile bool seos_deferred = false;
+static volatile bool seos_need_process = false;
+static volatile bool seos_ack_seen = false;
+static volatile bool seos_iblock_ready = false;
+static bool seos_extended_fwt = false;
 
 #define SEOS_SW_SM_MISSING    0x6987
 #define SEOS_SW_SM_INCORRECT  0x6988
 #define SEOS_SW_WRONG_P1P2    0x6A86
 #define SEOS_APDU_FRAME_MAX   NFC_14A_4_INF_MAX
+#define SEOS_FDT_10MS         135600u
+#define SEOS_FDT_FWT          0x000FFFFFu
+#define SEOS_WTX_KEEPALIVE_MS 40
+
+APP_TIMER_DEF(seos_wtx_timer);
+static bool seos_wtx_timer_inited = false;
+static void seos_wtx_timer_stop(void);
 
 static void seos_pending_clear(void) {
     seos_pending_len = 0;
@@ -315,6 +329,13 @@ static void seos_refresh_session(void) {
     memset(diver_cmac_key, 0, sizeof(diver_cmac_key));
     seos_sm_active = false;
     seos_adf_index = 0;
+    seos_wtx_waiting = false;
+    seos_deferred = false;
+    seos_need_process = false;
+    seos_ack_seen = false;
+    seos_iblock_ready = false;
+    seos_extended_fwt = false;
+    seos_wtx_timer_stop();
     seos_pending_clear();
 
     if (m_tag_information == NULL) {
@@ -340,6 +361,49 @@ static void seos_sm_fail(uint8_t *apdu_status, uint16_t sw) {
     apdu_status[1] = (uint8_t)(sw & 0xFF);
 }
 
+static void seos_wtx_timer_stop(void) {
+    if (seos_wtx_timer_inited) {
+        app_timer_stop(seos_wtx_timer);
+    }
+}
+
+static void seos_try_send_iblock(void) {
+    if (!seos_ack_seen || !seos_iblock_ready) {
+        return;
+    }
+    seos_wtx_timer_stop();
+    seos_ack_seen = false;
+    seos_iblock_ready = false;
+    seos_wtx_waiting = false;
+    seos_deferred = false;
+    seos_extended_fwt = true;
+    nfc_tag_14a_set_frame_delay_max(SEOS_FDT_FWT);
+    m_tcl_session_state.m_response_ready = true;
+    nfc_tag_14a_4_base_respond(&m_tcl_session_state);
+    seos_extended_fwt = false;
+}
+
+static void seos_wtx_timer_handler(void *context) {
+    (void)context;
+    if (!seos_wtx_waiting) {
+        return;
+    }
+    seos_try_send_iblock();
+    if (!seos_wtx_waiting || seos_iblock_ready) {
+        return;
+    }
+    m_tcl_session_state.m_response_ready = false;
+    nfc_tag_14a_set_frame_delay_max(SEOS_FDT_FWT);
+    nfc_tag_14a_4_base_respond(&m_tcl_session_state);
+    app_timer_start(seos_wtx_timer, APP_TIMER_TICKS(SEOS_WTX_KEEPALIVE_MS), NULL);
+}
+
+static void seos_wtx_timer_arm(void) {
+    if (seos_wtx_timer_inited) {
+        app_timer_start(seos_wtx_timer, APP_TIMER_TICKS(SEOS_WTX_KEEPALIVE_MS), NULL);
+    }
+}
+
 /* Send one ISO7816 APDU. If the body plus SW does not fit one T=CL
  * I-block, keep the tail for GET RESPONSE (00 C0) and return 61 xx. */
 static void seos_commit_response(uint8_t *apdu_status) {
@@ -363,7 +427,14 @@ static void seos_commit_response(uint8_t *apdu_status) {
     }
 
     m_tcl_session_state.m_response_ready = true;
-    NRF_NFCT->FRAMEDELAYMAX = 135600; // 10ms
+    if (seos_deferred) {
+        seos_iblock_ready = true;
+        seos_try_send_iblock();
+        return;
+    }
+    if (!seos_extended_fwt) {
+        nfc_tag_14a_set_frame_delay_max(SEOS_FDT_10MS);
+    }
     nfc_tag_14a_4_base_respond(&m_tcl_session_state);
 }
 
@@ -759,10 +830,22 @@ static void seos_fill_shill_authenticate(uint8_t *apdu_status) {
 /*  State handler (called from NFCT ISR on each received frame)        */
 /* ------------------------------------------------------------------ */
 
-static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
-    // Only continue if we have a full APDU ready
-    if (!nfc_tag_14a_4_base_handler(&m_tcl_session_state, data, szBytes)) return;
+static bool seos_object_is_large(void) {
+    if (m_tag_information == NULL) {
+        return false;
+    }
+    return m_tag_information->data_len > 80;
+}
 
+static bool seos_ins_needs_wtx(uint8_t ins) {
+    return (ins == 0xCB || ins == 0xDA || ins == 0xDB) && seos_object_is_large();
+}
+
+static bool seos_pcb_is_wtx(uint8_t pcb) {
+    return (pcb & 0xF2) == 0xF2;
+}
+
+static void nfc_tag_seos_process_apdu(void) {
     uint8_t *receivedCmd = m_tcl_session_state.m_apdu_buf;
     m_tcl_session_state.m_resp_len = 0;
 
@@ -1426,6 +1509,42 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
     seos_commit_response(apdu_status);
 }
 
+static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
+    if (szBytes > 0 && seos_wtx_waiting && seos_pcb_is_wtx(data[0])) {
+        seos_ack_seen = true;
+        nfc_tag_14a_set_frame_delay_max(SEOS_FDT_FWT);
+        seos_try_send_iblock();
+        return;
+    }
+
+    if (!nfc_tag_14a_4_base_handler(&m_tcl_session_state, data, szBytes)) {
+        return;
+    }
+
+    if (m_tcl_session_state.m_apdu_len >= 2 &&
+        seos_ins_needs_wtx(m_tcl_session_state.m_apdu_buf[1])) {
+        seos_deferred = true;
+        seos_wtx_waiting = true;
+        seos_need_process = true;
+        seos_ack_seen = false;
+        seos_iblock_ready = false;
+        m_tcl_session_state.m_response_ready = false;
+        nfc_tag_14a_4_base_respond(&m_tcl_session_state);
+        return;
+    }
+
+    nfc_tag_seos_process_apdu();
+}
+
+bool nfc_tag_seos_poll(void) {
+    if (seos_need_process) {
+        seos_need_process = false;
+        seos_wtx_timer_arm();
+        nfc_tag_seos_process_apdu();
+    }
+    return seos_wtx_waiting || seos_need_process || seos_deferred;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Reset handler                                                       */
 /* ------------------------------------------------------------------ */
@@ -1465,6 +1584,10 @@ int nfc_tag_seos_data_loadcb(tag_specific_type_t type, tag_data_buffer_t *buffer
     ulc_3des_init();
     memcpy(session_uid, m_tag_information->res_coll.uid, sizeof(session_uid));
     seos_refresh_session();
+    if (!seos_wtx_timer_inited) {
+        app_timer_create(&seos_wtx_timer, APP_TIMER_MODE_SINGLE_SHOT, seos_wtx_timer_handler);
+        seos_wtx_timer_inited = true;
+    }
 
     nfc_tag_14a_handler_t handler = {
         .get_coll_res = nfc_tag_seos_get_coll_res,

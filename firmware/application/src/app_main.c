@@ -13,6 +13,7 @@
 #include "nrf_drv_gpiote.h"
 #include "nrf_drv_rng.h"
 #include "nfc_mf1.h"         // for nfc_tag_mf1_prng_seed
+#include "nfc_seos.h"
 #include "nrf_power.h"
 #include "nrf_pwr_mgmt.h"
 #include "nrfx_nfct.h"
@@ -1186,6 +1187,7 @@ int main(void) {
             blink_usb_led_status();
         }
 
+        bool seos_busy = nfc_tag_seos_poll();
         // Data pack process
         data_frame_process();
         // Log print process
@@ -1197,6 +1199,8 @@ int main(void) {
         // No task to process, system sleep enter.
         // If system idle sometime, we can enter deep sleep state.
         // Some task process done, we can enter cpu sleep state.
-        sleep_system_run(system_off_enter, nrf_pwr_mgmt_run);
+        if (!seos_busy) {
+            sleep_system_run(system_off_enter, nrf_pwr_mgmt_run);
+        }
     }
 }
