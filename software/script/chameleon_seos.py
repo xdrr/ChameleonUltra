@@ -1,5 +1,6 @@
 """SEOS emulator helpers shared by the CLI (algorithm names and eview)."""
 
+import hashlib
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Union
 
 SEOS_HASH_SHA1 = 0x06
@@ -371,6 +372,36 @@ def add_seos_object_arg(parser) -> None:
         metavar="<tag:hex>",
         help="Extra ADF object (repeatable), e.g. FF41:DEADBEEF.",
     )
+
+
+def seos_session_keys(
+    key_ifd: bytes,
+    key_icc: bytes,
+    rnd_icc: bytes,
+    rnd_ifd: bytes,
+    encr_alg: int,
+    hash_alg: int,
+) -> tuple:
+    """Derive session enc/mac keys. SHA-1 hashes twice with the counter LSB."""
+    material = (
+        bytes([0x00, 0x00, 0x00, 0x01])
+        + bytes(key_ifd[:8])
+        + bytes(key_icc[:8])
+        + bytes([encr_alg & 0xFF, encr_alg & 0xFF])
+        + bytes(rnd_icc[:8])
+        + bytes(rnd_ifd[:8])
+    )
+    if hash_alg == SEOS_HASH_SHA256:
+        digest = hashlib.sha256(material).digest()
+        return digest[:16], digest[16:32]
+    if hash_alg == SEOS_HASH_SHA1:
+        first = hashlib.sha1(material).digest()
+        second_in = bytearray(material)
+        second_in[3] = (second_in[3] + 1) & 0xFF
+        second = hashlib.sha1(second_in).digest()
+        combined = first + second
+        return combined[:16], combined[16:32]
+    raise ValueError("Unknown SEOS hash algorithm")
 
 
 def seos_ber_length(n: int) -> bytes:

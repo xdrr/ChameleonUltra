@@ -41,6 +41,7 @@ from chameleon_seos import (  # noqa: E402
     seos_iso7816_more_sw,
     seos_iso7816_split_response,
     seos_iso7816_wrong_le,
+    seos_session_keys,
     seos_parse_object_arg,
     seos_parse_requested_tags,
     seos_sm_mac_objects,
@@ -298,6 +299,20 @@ class TestSeosBerLength(unittest.TestCase):
     def test_long_form_for_large_cryptogram(self):
         self.assertEqual(seos_ber_length(224), bytes([0x81, 224]))
         self.assertEqual(seos_ber_length(255), bytes([0x81, 255]))
+
+
+class TestSeosSessionKeys(unittest.TestCase):
+    def test_sha1_2k3des_matches_flipper_vector(self):
+        enc, mac = seos_session_keys(
+            key_ifd=bytes.fromhex("c7ced5dce3eaf1f8ff060d141b222930"),
+            key_icc=bytes.fromhex("e7eef5fc030a11181f262d343b424950"),
+            rnd_icc=bytes.fromhex("777e858c939aa1a8"),
+            rnd_ifd=bytes.fromhex("a7aeb5bcc3cad1d8"),
+            encr_alg=SEOS_ENCR_2K3DES,
+            hash_alg=SEOS_HASH_SHA1,
+        )
+        self.assertEqual(enc, bytes.fromhex("ce1e7147b721cfa0ac5948b1e47c1725"))
+        self.assertEqual(mac, bytes.fromhex("24eca46b64aa0d05f0d9d80f1f9d13f9"))
 
 
 class TestSeosIBlockReassembly(unittest.TestCase):

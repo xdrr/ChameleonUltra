@@ -191,6 +191,7 @@ INC_FOLDERS += \
   ${PROJ_DIR}/utils/ \
   ${PROJ_DIR}/rfid/ \
   ${PROJ_DIR}/rfid/crypto/ \
+  $(SDK_ROOT)/external/nrf_oberon/include \
   ${PROJ_DIR}/rfid/nfctag/ \
   ${PROJ_DIR}/rfid/nfctag/hf \
   ${PROJ_DIR}/rfid/nfctag/lf \

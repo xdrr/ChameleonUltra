@@ -18,8 +18,8 @@
 
 #include <nrf_crypto_aes.h>
 #include <nrf_crypto_hash.h>
-
-// Only AES128/SHA256 are currently available. 3DES and SHA1 would have to be implemented in software.
+#include "ulc_3des.h"
+#include "ocrypto_sha1.h"
 
 #define SEOS_ENCRYPTION_2K3DES      0x02
 #define SEOS_ENCRYPTION_3K3DES      0x03
@@ -72,6 +72,13 @@ static bool generate_cryptogram(uint8_t *key, bool use_iv, uint8_t *input, size_
             NRF_LOG_ERROR("Seos: Error decrypting cryptogram: %s", nrf_crypto_error_string_get(result));
             return false;
         }
+    } else if (algorithm == SEOS_ENCRYPTION_2K3DES) {
+        uint8_t iv[8];
+        memcpy(iv, cryptogram_iv, 8);
+        if (length == 0 || (length % 8) != 0) {
+            return false;
+        }
+        ulc_tdes_enc_cbc(output, input, length, key, iv);
     } else {
         NRF_LOG_ERROR("Seos: Unknown Encryption Algorithm");
         return false;
@@ -95,11 +102,84 @@ static bool decrypt_cryptogram(uint8_t *key, uint8_t *input, size_t length, uint
             NRF_LOG_ERROR("Seos: Error decrypting cryptogram: %s", nrf_crypto_error_string_get(result));
             return false;
         }
+    } else if (algorithm == SEOS_ENCRYPTION_2K3DES) {
+        uint8_t iv[8];
+        memcpy(iv, cryptogram_iv, 8);
+        if (length == 0 || (length % 8) != 0) {
+            return false;
+        }
+        ulc_tdes_dec_cbc(output, input, length, key, iv);
     } else {
         NRF_LOG_ERROR("Seos: Unknown Encryption Algorithm");
         return false;
     }
 
+    return true;
+}
+
+static void seos_xor8(uint8_t *out, const uint8_t *a, const uint8_t *b) {
+    for (uint8_t i = 0; i < 8; i++) {
+        out[i] = (uint8_t)(a[i] ^ b[i]);
+    }
+}
+
+static void seos_shift_left8(const uint8_t *in, uint8_t *out) {
+    for (uint8_t i = 0; i < 7; i++) {
+        out[i] = (uint8_t)((in[i] << 1) | (in[i + 1] >> 7));
+    }
+    out[7] = (uint8_t)(in[7] << 1);
+}
+
+static bool seos_des_cmac(const uint8_t *key, const uint8_t *input, size_t length, uint8_t *output) {
+    uint8_t iv[8];
+    uint8_t zero[8];
+    uint8_t l[8];
+    uint8_t k1[8];
+    uint8_t k2[8];
+    memset(zero, 0, 8);
+    memset(iv, 0, 8);
+    ulc_tdes_enc_cbc(l, zero, 8, key, iv);
+
+    seos_shift_left8(l, k1);
+    if (l[0] & 0x80) {
+        k1[7] ^= 0x1b;
+    }
+    seos_shift_left8(k1, k2);
+    if (k1[0] & 0x80) {
+        k2[7] ^= 0x1b;
+    }
+
+    size_t n = (length + 7) / 8;
+    bool complete = (length > 0) && ((length % 8) == 0);
+    if (n == 0) {
+        n = 1;
+    }
+
+    uint8_t last[8];
+    memset(last, 0, 8);
+    if (complete) {
+        memcpy(last, input + (n - 1) * 8, 8);
+        seos_xor8(last, last, k1);
+    } else {
+        size_t tail = length % 8;
+        if (length > 0) {
+            memcpy(last, input + (n - 1) * 8, tail);
+        }
+        last[tail] = 0x80;
+        seos_xor8(last, last, k2);
+    }
+
+    uint8_t x[8];
+    uint8_t y[8];
+    memset(x, 0, 8);
+    for (size_t i = 0; i + 1 < n; i++) {
+        seos_xor8(y, x, input + i * 8);
+        memset(iv, 0, 8);
+        ulc_tdes_enc_cbc(x, y, 8, key, iv);
+    }
+    seos_xor8(y, x, last);
+    memset(iv, 0, 8);
+    ulc_tdes_enc_cbc(output, y, 8, key, iv);
     return true;
 }
 
@@ -122,6 +202,8 @@ static bool generate_cmac(uint8_t *key, uint8_t *input, size_t length, uint8_t *
             NRF_LOG_ERROR("Seos: Incorrect CMAC output size: %d", hash_size);
             return false;
         }
+    } else if (encryption_algorithm == SEOS_ENCRYPTION_2K3DES) {
+        return seos_des_cmac(key, input, length, output);
     } else {
         NRF_LOG_ERROR("Seos: Unknown Encryption Algorithm");
         return false;
@@ -831,6 +913,10 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                         NRF_LOG_ERROR("Seos: Incorrect SHA256 output size: %d", hash_size);
                         break;
                     }
+                } else if (m_tag_information->hash_alg == SEOS_HASHING_SHA1) {
+                    ocrypto_sha1(hash_output, hash_input, hash_idx);
+                    hash_input[3]++;
+                    ocrypto_sha1(hash_output + 20, hash_input, hash_idx);
                 } else {
                     NRF_LOG_ERROR("Seos: Unknown Hashing Algorithm");
                     break;
