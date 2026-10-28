@@ -2097,6 +2097,7 @@ class ChameleonCMD:
         adf2_diversifier: Union[bytes, None] = None,
         adf2_tag: Union[bytes, None] = None,
         adf2_data: Union[bytes, None] = None,
+        rnd_icc: Union[bytes, None] = None,
     ):
         payload = pack_seos_emu_data(
             data=data,
@@ -2113,6 +2114,7 @@ class ChameleonCMD:
             adf2_diversifier=adf2_diversifier,
             adf2_tag=adf2_tag,
             adf2_data=adf2_data,
+            rnd_icc=rnd_icc,
         )
 
         if len(payload) > 4096:
@@ -2127,8 +2129,21 @@ class ChameleonCMD:
         privenc: bytes,
         privmac: bytes,
         auth_write: Union[bytes, None] = None,
+        adf2_auth: Union[bytes, None] = None,
+        adf2_privenc: Union[bytes, None] = None,
+        adf2_privmac: Union[bytes, None] = None,
+        adf2_auth_write: Union[bytes, None] = None,
     ):
-        payload = pack_seos_emu_keys(auth, privenc, privmac, auth_write)
+        payload = pack_seos_emu_keys(
+            auth,
+            privenc,
+            privmac,
+            auth_write,
+            adf2_auth=adf2_auth,
+            adf2_privenc=adf2_privenc,
+            adf2_privmac=adf2_privmac,
+            adf2_auth_write=adf2_auth_write,
+        )
         return self.device.send_cmd_sync(Command.SEOS_WRITE_EMU_KEYS, payload)
 
 

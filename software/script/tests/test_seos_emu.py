@@ -22,8 +22,11 @@ from chameleon_seos import (  # noqa: E402
     SEOS_KEYSLOT_WRITE,
     SEOS_SW_SM_INCORRECT,
     SEOS_SW_SM_MISSING,
+    SEOS_ADP_STATIC_RND_ICC,
     add_seos_adf2_args,
     add_seos_gdf_args,
+    add_seos_adf2_key_args,
+    add_seos_rnd_arg,
     add_seos_write_key_arg,
     build_seos_shill_authenticate,
     build_seos_shill_select_adf,
@@ -39,10 +42,16 @@ from chameleon_seos import (  # noqa: E402
     seos_ber_length,
     seos_collect_objects,
     seos_iblock_reassemble,
+    seos_get_response_apdu,
     seos_iso7816_continue,
+    seos_iso7816_leftover_retry,
     seos_iso7816_more_sw,
+    seos_iso7816_retry_le,
     seos_iso7816_split_response,
     seos_iso7816_wrong_le,
+    seos_unwrap_get_data_rapdu,
+    seos_wrap_get_data_capdu,
+    seos_wrap_get_data_rapdu,
     seos_session_keys,
     seos_parse_object_arg,
     seos_parse_requested_tags,
@@ -258,6 +267,74 @@ class TestSeosAuthKeyslot(unittest.TestCase):
         self.assertEqual(parsed_w["auth_write"], write)
 
 
+class TestSeosAdf2Keys(unittest.TestCase):
+    def test_pack_unpack_distinct_adf2_keys(self):
+        auth = bytes(range(16))
+        privenc = bytes(range(16, 32))
+        privmac = bytes(range(32, 48))
+        write = bytes(range(48, 64))
+        adf2_auth = bytes(range(64, 80))
+        adf2_privenc = bytes(range(80, 96))
+        adf2_privmac = bytes(range(96, 112))
+        adf2_write = bytes(range(112, 128))
+        packed = pack_seos_emu_keys(
+            auth,
+            privenc,
+            privmac,
+            write,
+            adf2_auth=adf2_auth,
+            adf2_privenc=adf2_privenc,
+            adf2_privmac=adf2_privmac,
+            adf2_auth_write=adf2_write,
+        )
+        self.assertEqual(len(packed), 128)
+        parsed = unpack_seos_emu_keys(packed)
+        self.assertEqual(parsed["auth"], auth)
+        self.assertEqual(parsed["adf2_auth"], adf2_auth)
+        self.assertEqual(parsed["adf2_privenc"], adf2_privenc)
+        self.assertEqual(parsed["adf2_privmac"], adf2_privmac)
+        self.assertEqual(parsed["adf2_auth_write"], adf2_write)
+        self.assertNotEqual(parsed["adf2_auth"], parsed["auth"])
+
+    def test_pack_adf2_keys_without_write_is_96(self):
+        auth = bytes(range(16))
+        privenc = bytes(range(16, 32))
+        privmac = bytes(range(32, 48))
+        adf2_auth = bytes(range(64, 80))
+        packed = pack_seos_emu_keys(
+            auth,
+            privenc,
+            privmac,
+            adf2_auth=adf2_auth,
+            adf2_privenc=bytes(range(80, 96)),
+            adf2_privmac=bytes(range(96, 112)),
+        )
+        self.assertEqual(len(packed), 96)
+        parsed = unpack_seos_emu_keys(packed)
+        self.assertEqual(parsed["adf2_auth"], adf2_auth)
+        self.assertNotIn("auth_write", parsed)
+        self.assertNotIn("adf2_auth_write", parsed)
+
+    def test_keys_parser_accepts_adf2_keys(self):
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        add_seos_adf2_key_args(parser)
+        args = parser.parse_args(
+            [
+                "--adf2-auth",
+                "00112233445566778899AABBCCDDEEFF",
+                "--adf2-privenc",
+                "112233445566778899AABBCCDDEEFF00",
+                "--adf2-privmac",
+                "2233445566778899AABBCCDDEEFF0011",
+            ]
+        )
+        self.assertEqual(args.adf2_auth, "00112233445566778899AABBCCDDEEFF")
+        self.assertEqual(args.adf2_privenc, "112233445566778899AABBCCDDEEFF00")
+        self.assertEqual(args.adf2_privmac, "2233445566778899AABBCCDDEEFF0011")
+
+
 class TestSeosUpdateData(unittest.TestCase):
     def test_parse_put_object_tag_len_value(self):
         tag, value = seos_parse_put_object(bytes.fromhex("FF000412345678"))
@@ -395,6 +472,75 @@ class TestSeosGetResponse(unittest.TestCase):
         self.assertEqual(chunk, b"")
         self.assertEqual(rest, b"")
         self.assertEqual(sw, 0x6A86)
+
+    def test_wrong_le_retry_then_delivers_pending(self):
+        leftover = bytes(range(20))
+        self.assertEqual(seos_iso7816_retry_le(0x6C14), 20)
+        self.assertIsNone(seos_iso7816_retry_le(0x9000))
+        self.assertEqual(seos_get_response_apdu(10), bytes.fromhex("00C000000A"))
+        chunk, rest, sw = seos_iso7816_leftover_retry(
+            leftover, first_le=10, max_frame=32
+        )
+        self.assertEqual(chunk, leftover)
+        self.assertEqual(rest, b"")
+        self.assertEqual(sw, 0x9000)
+
+
+class TestSeosGetDataWrap(unittest.TestCase):
+    def test_2k3des_get_data_wrap_roundtrip(self):
+        enc, mac = seos_session_keys(
+            key_ifd=bytes.fromhex("c7ced5dce3eaf1f8ff060d141b222930"),
+            key_icc=bytes.fromhex("e7eef5fc030a11181f262d343b424950"),
+            rnd_icc=bytes.fromhex("777e858c939aa1a8"),
+            rnd_ifd=bytes.fromhex("a7aeb5bcc3cad1d8"),
+            encr_alg=SEOS_ENCR_2K3DES,
+            hash_alg=SEOS_HASH_SHA1,
+        )
+        plaintext = bytes.fromhex("FF00020500")
+        wrapped = seos_wrap_get_data_rapdu(
+            enc_key=enc,
+            mac_key=mac,
+            rnd_icc=bytes.fromhex("777e858c939aa1a8"),
+            rnd_ifd=bytes.fromhex("a7aeb5bcc3cad1d8"),
+            plaintext=plaintext,
+            encr_alg=SEOS_ENCR_2K3DES,
+        )
+        self.assertEqual(wrapped[0], 0x85)
+        self.assertEqual(wrapped[-10:-8], bytes.fromhex("8E08"))
+        recovered = seos_unwrap_get_data_rapdu(
+            enc_key=enc,
+            mac_key=mac,
+            rnd_icc=bytes.fromhex("777e858c939aa1a8"),
+            rnd_ifd=bytes.fromhex("a7aeb5bcc3cad1d8"),
+            body=wrapped,
+            encr_alg=SEOS_ENCR_2K3DES,
+        )
+        self.assertEqual(recovered, plaintext)
+
+    def test_2k3des_get_data_command_has_85_97_8e(self):
+        enc, mac = seos_session_keys(
+            key_ifd=bytes.fromhex("c7ced5dce3eaf1f8ff060d141b222930"),
+            key_icc=bytes.fromhex("e7eef5fc030a11181f262d343b424950"),
+            rnd_icc=bytes.fromhex("777e858c939aa1a8"),
+            rnd_ifd=bytes.fromhex("a7aeb5bcc3cad1d8"),
+            encr_alg=SEOS_ENCR_2K3DES,
+            hash_alg=SEOS_HASH_SHA1,
+        )
+        apdu = seos_wrap_get_data_capdu(
+            enc_key=enc,
+            mac_key=mac,
+            rnd_icc=bytes.fromhex("777e858c939aa1a8"),
+            rnd_ifd=bytes.fromhex("a7aeb5bcc3cad1d8"),
+            tag=bytes.fromhex("FF00"),
+            encr_alg=SEOS_ENCR_2K3DES,
+        )
+        self.assertEqual(apdu[:4], bytes.fromhex("0CCB3FFF"))
+        body = apdu[5:]
+        objects, cmac = seos_sm_mac_objects(body)
+        self.assertIsNotNone(cmac)
+        self.assertEqual(len(cmac), 8)
+        self.assertIn(bytes.fromhex("9700"), objects)
+        self.assertEqual(objects[0], 0x85)
 
 
 class TestSeosMultiTag(unittest.TestCase):
@@ -547,6 +693,59 @@ class TestSeosMultiAdf(unittest.TestCase):
         self.assertEqual(args.aid, "A000000382002D000101")
         self.assertEqual(args.adf2_oid, "03010709AABBCC")
         self.assertEqual(args.adf2_data, "AABB")
+
+
+class TestSeosStaticRnd(unittest.TestCase):
+    def test_adp_static_rnd_is_captured(self):
+        self.assertEqual(SEOS_ADP_STATIC_RND_ICC, bytes.fromhex("0181E43801010201"))
+
+    def test_pack_unpack_static_rnd(self):
+        packed = pack_seos_emu_data(
+            data=bytes.fromhex("0500"),
+            oid=SEOS_FACTORY_ADF_OID,
+            tag=bytes.fromhex("FF00"),
+            diversifier=bytes.fromhex("01020304050607"),
+            hash_alg=SEOS_HASH_SHA256,
+            encr_alg=SEOS_ENCR_AES,
+            gdf_oid=SEOS_FACTORY_GDF_OID,
+            gdf_diversifier=SEOS_FACTORY_GDF_DIV,
+            rnd_icc=SEOS_ADP_STATIC_RND_ICC,
+        )
+        parsed = unpack_seos_emu_data(packed)
+        self.assertEqual(parsed["rnd_icc"], SEOS_ADP_STATIC_RND_ICC)
+
+    def test_eview_prints_static_or_random_rnd(self):
+        static_lines = format_seos_eview(
+            {
+                "data": bytes.fromhex("0500"),
+                "oid": SEOS_FACTORY_ADF_OID,
+                "tag": bytes.fromhex("FF00"),
+                "diversifier": bytes.fromhex("01020304050607"),
+                "hash_alg": SEOS_HASH_SHA256,
+                "encr_alg": SEOS_ENCR_AES,
+                "rnd_icc": SEOS_ADP_STATIC_RND_ICC,
+            }
+        )
+        self.assertIn("RND.ICC: static 0181E43801010201", "\n".join(static_lines))
+        random_lines = format_seos_eview(
+            {
+                "data": bytes.fromhex("0500"),
+                "oid": SEOS_FACTORY_ADF_OID,
+                "tag": bytes.fromhex("FF00"),
+                "diversifier": bytes.fromhex("01020304050607"),
+                "hash_alg": SEOS_HASH_SHA256,
+                "encr_alg": SEOS_ENCR_AES,
+            }
+        )
+        self.assertIn("RND.ICC: randomized per field", "\n".join(random_lines))
+
+    def test_eload_parser_accepts_rnd_icc(self):
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        add_seos_rnd_arg(parser)
+        args = parser.parse_args(["--rnd-icc", "0181E43801010201"])
+        self.assertEqual(args.rnd_icc, "0181E43801010201")
 
 
 if __name__ == "__main__":

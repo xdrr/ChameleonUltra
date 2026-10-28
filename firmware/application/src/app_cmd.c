@@ -1345,19 +1345,24 @@ static data_frame_tx_t *cmd_processor_seos_read_emu_data(uint16_t cmd, uint16_t 
     if (!seos_adf2_valid(info)) {
         seos_apply_empty_adf2(info);
     }
+    if (!seos_rnd_valid(info)) {
+        seos_apply_random_rnd(info);
+    }
 
     uint16_t extra_bytes = 1;
     for (uint8_t i = 0; i < info->extra_count && i < NFC_TAG_SEOS_EXTRA_MAX; i++) {
         extra_bytes += 1 + info->extra[i].tag_len + 1 + info->extra[i].data_len;
     }
     uint16_t adf2_bytes = 0;
-    if (info->extra_aid_len || info->adf2_oid_len) {
+    bool emit_adf2 = info->extra_aid_len || info->adf2_oid_len || info->rnd_icc_len;
+    if (emit_adf2) {
         adf2_bytes = (uint16_t)(1 + info->extra_aid_len + 1 + info->adf2_oid_len +
                                 1 + info->adf2_diversifier_len + 1 + info->adf2_tag_len +
                                 1 + info->adf2_data_len);
     }
+    uint16_t rnd_bytes = info->rnd_icc_len ? (uint16_t)(1 + info->rnd_icc_len) : 0;
 
-    uint8_t output[1+info->diversifier_len + 1+info->oid_len + 1+info->data_tag_len + 1+info->data_len + 2 + 1+info->gdf_oid_len + 1+info->gdf_diversifier_len + extra_bytes + adf2_bytes];
+    uint8_t output[1+info->diversifier_len + 1+info->oid_len + 1+info->data_tag_len + 1+info->data_len + 2 + 1+info->gdf_oid_len + 1+info->gdf_diversifier_len + extra_bytes + adf2_bytes + rnd_bytes];
     uint16_t offset = 0;
 
     output[offset++] = info->data_len;
@@ -1397,7 +1402,7 @@ static data_frame_tx_t *cmd_processor_seos_read_emu_data(uint16_t cmd, uint16_t 
         offset += info->extra[i].data_len;
     }
 
-    if (info->extra_aid_len || info->adf2_oid_len) {
+    if (emit_adf2) {
         output[offset++] = info->extra_aid_len;
         memcpy(output+offset, info->extra_aid, info->extra_aid_len);
         offset += info->extra_aid_len;
@@ -1413,6 +1418,11 @@ static data_frame_tx_t *cmd_processor_seos_read_emu_data(uint16_t cmd, uint16_t 
         output[offset++] = info->adf2_data_len;
         memcpy(output+offset, info->adf2_data, info->adf2_data_len);
         offset += info->adf2_data_len;
+    }
+    if (info->rnd_icc_len) {
+        output[offset++] = info->rnd_icc_len;
+        memcpy(output+offset, info->rnd_icc, info->rnd_icc_len);
+        offset += info->rnd_icc_len;
     }
 
     return data_frame_make(cmd, STATUS_SUCCESS, offset, output);
@@ -1565,18 +1575,29 @@ static data_frame_tx_t *cmd_processor_seos_write_emu_data(uint16_t cmd, uint16_t
         }
         info->adf2_data_len = len;
         memcpy(info->adf2_data, data+offset, len);
-        memcpy(info->adf2_authkey, info->authkey, 16);
-        memcpy(info->adf2_privenc, info->privenc, 16);
-        memcpy(info->adf2_privmac, info->privmac, 16);
-        memcpy(info->adf2_authkey_write, info->authkey_write, 16);
+        offset += len;
         info->adf_magic = SEOS_ADF_MAGIC;
+    }
+
+    if (offset < length) {
+        len = data[offset++];
+        if (len != 8 || offset + len > length) {
+            return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+        }
+        info->rnd_magic = SEOS_RND_MAGIC;
+        info->rnd_icc_len = 8;
+        memcpy(info->rnd_icc, data+offset, 8);
+        offset += 8;
+    } else {
+        seos_apply_random_rnd(info);
     }
 
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
 }
 
 static data_frame_tx_t *cmd_processor_seos_write_emu_keys(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
-    if (length != 16 * 3 && length != 16 * 4) {
+    if (length != 16 * 3 && length != 16 * 4 &&
+        length != 16 * 6 && length != 16 * 7 && length != 16 * 8) {
         return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
     }
     tag_data_buffer_t *buffer = get_buffer_by_tag_type(TAG_TYPE_SEOS);
@@ -1585,17 +1606,26 @@ static data_frame_tx_t *cmd_processor_seos_write_emu_keys(uint16_t cmd, uint16_t
     memcpy(info->authkey, data+ 0, 16);
     memcpy(info->privenc, data+16, 16);
     memcpy(info->privmac, data+32, 16);
-    if (length == 16 * 4) {
+    if (length == 16 * 4 || length == 16 * 8) {
         memcpy(info->authkey_write, data+48, 16);
         info->writekey_magic = SEOS_WRITEKEY_MAGIC;
     } else if (!seos_writekey_valid(info)) {
         seos_apply_default_writekey(info);
     }
-    if (seos_adf2_valid(info) && info->adf2_oid_len > 0) {
-        memcpy(info->adf2_authkey, info->authkey, 16);
-        memcpy(info->adf2_privenc, info->privenc, 16);
-        memcpy(info->adf2_privmac, info->privmac, 16);
-        memcpy(info->adf2_authkey_write, info->authkey_write, 16);
+    if (length == 16 * 6) {
+        memcpy(info->adf2_authkey, data+48, 16);
+        memcpy(info->adf2_privenc, data+64, 16);
+        memcpy(info->adf2_privmac, data+80, 16);
+    } else if (length == 16 * 7) {
+        memcpy(info->adf2_authkey, data+48, 16);
+        memcpy(info->adf2_privenc, data+64, 16);
+        memcpy(info->adf2_privmac, data+80, 16);
+        memcpy(info->adf2_authkey_write, data+96, 16);
+    } else if (length == 16 * 8) {
+        memcpy(info->adf2_authkey, data+64, 16);
+        memcpy(info->adf2_privenc, data+80, 16);
+        memcpy(info->adf2_privmac, data+96, 16);
+        memcpy(info->adf2_authkey_write, data+112, 16);
     }
 
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);

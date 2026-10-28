@@ -15,6 +15,7 @@ SEOS_FACTORY_ADF_OID = bytes.fromhex("030107090000000000")
 SEOS_FACTORY_GDF_OID = bytes.fromhex("03010709FFFFFFFFFF")
 SEOS_FACTORY_GDF_DIV = bytes.fromhex("00000000000000")
 SEOS_MOBILE_ADMIN_AID = bytes.fromhex("A000000382002D000101")
+SEOS_ADP_STATIC_RND_ICC = bytes.fromhex("0181E43801010201")
 
 _HASH_BY_NAME = {
     "sha1": SEOS_HASH_SHA1,
@@ -135,6 +136,7 @@ def pack_seos_emu_data(
     adf2_diversifier: Optional[bytes] = None,
     adf2_tag: Optional[bytes] = None,
     adf2_data: Optional[bytes] = None,
+    rnd_icc: Optional[bytes] = None,
 ) -> bytes:
     payload = (
         _tlv_put(data)
@@ -146,12 +148,13 @@ def pack_seos_emu_data(
     if gdf_oid is not None and gdf_diversifier is not None:
         payload += _tlv_put(gdf_oid) + _tlv_put(gdf_diversifier)
         has_adf2 = extra_aid is not None or adf2_oid is not None
-        if extras is not None or has_adf2:
+        has_rnd = rnd_icc is not None
+        if extras is not None or has_adf2 or has_rnd:
             extra_list = list(extras) if extras is not None else []
             payload += bytes([len(extra_list)])
             for extra_tag, extra_data in extra_list:
                 payload += _tlv_put(bytes(extra_tag)) + _tlv_put(bytes(extra_data))
-            if has_adf2:
+            if has_adf2 or has_rnd:
                 payload += (
                     _tlv_put(extra_aid or b"")
                     + _tlv_put(adf2_oid or b"")
@@ -159,6 +162,8 @@ def pack_seos_emu_data(
                     + _tlv_put(adf2_tag or b"")
                     + _tlv_put(adf2_data or b"")
                 )
+                if has_rnd:
+                    payload += _tlv_put(rnd_icc or b"")
     return payload
 
 
@@ -203,6 +208,9 @@ def unpack_seos_emu_data(payload: bytes) -> Dict[str, Union[bytes, int, List]]:
         parsed["adf2_diversifier"] = adf2_diversifier
         parsed["adf2_tag"] = adf2_tag
         parsed["adf2_data"] = adf2_data
+    if offset < len(payload):
+        rnd_icc, offset = _tlv_take(payload, offset)
+        parsed["rnd_icc"] = rnd_icc
     return parsed
 
 
@@ -268,6 +276,11 @@ def format_seos_eview(data: Dict[str, Union[bytes, int]]) -> List[str]:
             lines.append(f"[=]    ADF2 Tag: {bytes(data['adf2_tag']).hex().upper()}")
         if data.get("adf2_data"):
             lines.append(f"[=]   ADF2 Data: {bytes(data['adf2_data']).hex().upper()}")
+    rnd_icc = data.get("rnd_icc")
+    if rnd_icc:
+        lines.append(f"[=]     RND.ICC: static {bytes(rnd_icc).hex().upper()}")
+    else:
+        lines.append("[=]     RND.ICC: randomized per field")
     lines.extend(
         [
             f"[=]        Hash: {hash_name} (0x{hash_alg:02X})",
@@ -303,21 +316,63 @@ def add_seos_write_key_arg(parser) -> None:
     )
 
 
+def add_seos_adf2_key_args(parser) -> None:
+    parser.add_argument(
+        "--adf2-auth",
+        type=str,
+        default=None,
+        metavar="<hex>",
+        help="Second ADF auth key (16 bytes). Leave unset to keep existing ADF2 keys.",
+    )
+    parser.add_argument(
+        "--adf2-privenc",
+        type=str,
+        default=None,
+        metavar="<hex>",
+        help="Second ADF PrivEnc key (16 bytes).",
+    )
+    parser.add_argument(
+        "--adf2-privmac",
+        type=str,
+        default=None,
+        metavar="<hex>",
+        help="Second ADF PrivMac key (16 bytes).",
+    )
+    parser.add_argument(
+        "--adf2-write",
+        type=str,
+        default=None,
+        metavar="<hex>",
+        help="Second ADF write-auth key (16 bytes). Used when the reader sends P2=02.",
+    )
+
+
 def pack_seos_emu_keys(
     auth: bytes,
     privenc: bytes,
     privmac: bytes,
     auth_write: Optional[bytes] = None,
+    adf2_auth: Optional[bytes] = None,
+    adf2_privenc: Optional[bytes] = None,
+    adf2_privmac: Optional[bytes] = None,
+    adf2_auth_write: Optional[bytes] = None,
 ) -> bytes:
     payload = auth + privenc + privmac
+    has_adf2 = adf2_auth is not None
     if auth_write is not None:
         payload += auth_write
+    if has_adf2:
+        payload += (adf2_auth or b"") + (adf2_privenc or b"") + (adf2_privmac or b"")
+        if adf2_auth_write is not None:
+            payload += adf2_auth_write
+        elif auth_write is not None:
+            payload += adf2_auth or b""
     return payload
 
 
 def unpack_seos_emu_keys(payload: bytes) -> Dict[str, bytes]:
-    if len(payload) not in (48, 64):
-        raise ValueError("SEOS key payload must be 48 or 64 bytes")
+    if len(payload) not in (48, 64, 96, 112, 128):
+        raise ValueError("SEOS key payload must be 48, 64, 96, 112, or 128 bytes")
     parsed = {
         "auth": payload[0:16],
         "privenc": payload[16:32],
@@ -325,6 +380,21 @@ def unpack_seos_emu_keys(payload: bytes) -> Dict[str, bytes]:
     }
     if len(payload) == 64:
         parsed["auth_write"] = payload[48:64]
+    elif len(payload) == 96:
+        parsed["adf2_auth"] = payload[48:64]
+        parsed["adf2_privenc"] = payload[64:80]
+        parsed["adf2_privmac"] = payload[80:96]
+    elif len(payload) == 112:
+        parsed["adf2_auth"] = payload[48:64]
+        parsed["adf2_privenc"] = payload[64:80]
+        parsed["adf2_privmac"] = payload[80:96]
+        parsed["adf2_auth_write"] = payload[96:112]
+    elif len(payload) == 128:
+        parsed["auth_write"] = payload[48:64]
+        parsed["adf2_auth"] = payload[64:80]
+        parsed["adf2_privenc"] = payload[80:96]
+        parsed["adf2_privmac"] = payload[96:112]
+        parsed["adf2_auth_write"] = payload[112:128]
     return parsed
 
 
@@ -451,6 +521,17 @@ def add_seos_adf2_args(parser) -> None:
     )
 
 
+def add_seos_rnd_arg(parser) -> None:
+    parser.add_argument(
+        "--rnd-icc",
+        type=str,
+        default=None,
+        metavar="<hex|random>",
+        help="Pin GA1 RND.ICC (8 bytes, ADP default-keyset is 0181E43801010201) "
+        "or 'random' to re-roll every field.",
+    )
+
+
 def seos_session_keys(
     key_ifd: bytes,
     key_icc: bytes,
@@ -551,6 +632,233 @@ def seos_iso7816_continue(
     rest = leftover[room:]
     sw = seos_iso7816_more_sw(len(rest)) if rest else 0x9000
     return bytes(chunk), bytes(rest), sw
+
+
+def seos_get_response_apdu(le: int) -> bytes:
+    return bytes([0x00, 0xC0, 0x00, 0x00, le & 0xFF])
+
+
+def seos_iso7816_retry_le(sw: int) -> Optional[int]:
+    if (sw >> 8) == 0x6C:
+        return sw & 0xFF
+    return None
+
+
+def seos_iso7816_leftover_retry(
+    leftover: bytes, first_le: int, max_frame: int
+) -> tuple:
+    """GET RESPONSE. A 6C xx answer keeps the body and retries with xx."""
+    chunk, rest, sw = seos_iso7816_continue(leftover, first_le, max_frame)
+    retry = seos_iso7816_retry_le(sw)
+    if retry is None:
+        return chunk, rest, sw
+    return seos_iso7816_continue(rest, retry, max_frame)
+
+
+def _seos_block_size(encr_alg: int) -> int:
+    return 8 if encr_alg == SEOS_ENCR_2K3DES else 16
+
+
+def seos_sm_counter(rnd_icc: bytes, rnd_ifd: bytes, encr_alg: int) -> bytes:
+    half = _seos_block_size(encr_alg) // 2
+    return bytes(rnd_icc[:half]) + bytes(rnd_ifd[:half])
+
+
+def seos_counter_inc(counter: bytes) -> bytes:
+    buf = bytearray(counter)
+    for i in range(len(buf) - 1, -1, -1):
+        buf[i] = (buf[i] + 1) & 0xFF
+        if buf[i]:
+            break
+    return bytes(buf)
+
+
+def seos_iso7816_pad80(data: bytes, block: int) -> bytes:
+    if len(data) % block == 0:
+        return bytes(data)
+    pad = block - (len(data) % block)
+    return bytes(data) + bytes([0x80]) + bytes(pad - 1)
+
+
+def seos_iso7816_unpad80(data: bytes) -> bytes:
+    i = len(data) - 1
+    while i >= 0 and data[i] == 0:
+        i -= 1
+    if i >= 0 and data[i] == 0x80:
+        return data[:i]
+    return bytes(data)
+
+
+def _openssl_des_ede_cbc(key: bytes, data: bytes, decrypt: bool = False) -> bytes:
+    import subprocess
+
+    args = [
+        "openssl",
+        "enc",
+        "-des-ede-cbc",
+        "-K",
+        bytes(key[:16]).hex(),
+        "-iv",
+        "00" * 8,
+        "-nopad",
+    ]
+    if decrypt:
+        args.append("-d")
+    proc = subprocess.run(args, input=data, capture_output=True, check=True)
+    return proc.stdout
+
+
+def seos_encrypt_cbc(key: bytes, data: bytes, encr_alg: int) -> bytes:
+    if encr_alg != SEOS_ENCR_2K3DES:
+        raise ValueError("host wrap only implements 2K3DES")
+    return _openssl_des_ede_cbc(key, data)
+
+
+def seos_decrypt_cbc(key: bytes, data: bytes, encr_alg: int) -> bytes:
+    if encr_alg != SEOS_ENCR_2K3DES:
+        raise ValueError("host wrap only implements 2K3DES")
+    return _openssl_des_ede_cbc(key, data, decrypt=True)
+
+
+def _shift_left8(src: bytes) -> bytes:
+    out = bytearray(8)
+    for i in range(7):
+        out[i] = ((src[i] << 1) | (src[i + 1] >> 7)) & 0xFF
+    out[7] = (src[7] << 1) & 0xFF
+    return bytes(out)
+
+
+def seos_des_cmac(key: bytes, data: bytes) -> bytes:
+    """ISO/IEC 9797-1 DES-CMAC, Rb=0x1b. Matches firmware seos_des_cmac."""
+    l = _openssl_des_ede_cbc(key, bytes(8))
+    k1 = bytearray(_shift_left8(l))
+    if l[0] & 0x80:
+        k1[7] ^= 0x1B
+    k2 = bytearray(_shift_left8(k1))
+    if k1[0] & 0x80:
+        k2[7] ^= 0x1B
+    n = (len(data) + 7) // 8
+    complete = len(data) > 0 and (len(data) % 8) == 0
+    if n == 0:
+        n = 1
+    last = bytearray(8)
+    if complete:
+        last[:] = data[(n - 1) * 8 : n * 8]
+        last = bytearray(a ^ b for a, b in zip(last, k1))
+    else:
+        tail = len(data) % 8
+        if len(data) > 0:
+            last[:tail] = data[(n - 1) * 8 :]
+        last[tail] = 0x80
+        last = bytearray(a ^ b for a, b in zip(last, k2))
+    x = bytes(8)
+    for i in range(n - 1):
+        block = bytes(a ^ b for a, b in zip(x, data[i * 8 : (i + 1) * 8]))
+        x = _openssl_des_ede_cbc(key, block)
+    y = bytes(a ^ b for a, b in zip(x, last))
+    return _openssl_des_ede_cbc(key, y)
+
+
+def seos_cmac8(key: bytes, data: bytes, encr_alg: int) -> bytes:
+    if encr_alg != SEOS_ENCR_2K3DES:
+        raise ValueError("host wrap only implements 2K3DES")
+    return seos_des_cmac(key, data)[:8]
+
+
+def seos_wrap_get_data_rapdu(
+    enc_key: bytes,
+    mac_key: bytes,
+    rnd_icc: bytes,
+    rnd_ifd: bytes,
+    plaintext: bytes,
+    encr_alg: int,
+) -> bytes:
+    """GET DATA RAPDU: 85 cryptogram + 99 9000 + 8E, response-counter CMAC."""
+    bs = _seos_block_size(encr_alg)
+    cryptogram = seos_encrypt_cbc(
+        enc_key, seos_iso7816_pad80(plaintext, bs), encr_alg
+    )
+    body = (
+        bytes([0x85])
+        + seos_ber_length(len(cryptogram))
+        + cryptogram
+        + bytes([0x99, 0x02, 0x90, 0x00])
+    )
+    counter = seos_counter_inc(
+        seos_counter_inc(seos_sm_counter(rnd_icc, rnd_ifd, encr_alg))
+    )
+    mac_in = counter + body
+    if len(mac_in) % bs:
+        mac_in = seos_iso7816_pad80(mac_in, bs)
+    cmac = seos_cmac8(mac_key, mac_in, encr_alg)
+    return body + bytes([0x8E, 0x08]) + cmac
+
+
+def seos_unwrap_get_data_rapdu(
+    enc_key: bytes,
+    mac_key: bytes,
+    rnd_icc: bytes,
+    rnd_ifd: bytes,
+    body: bytes,
+    encr_alg: int,
+) -> bytes:
+    objects, cmac = seos_sm_mac_objects(body)
+    if cmac is None or len(cmac) != 8:
+        raise ValueError("GET DATA response is missing 8E")
+    bs = _seos_block_size(encr_alg)
+    counter = seos_counter_inc(
+        seos_counter_inc(seos_sm_counter(rnd_icc, rnd_ifd, encr_alg))
+    )
+    mac_in = counter + objects
+    if len(mac_in) % bs:
+        mac_in = seos_iso7816_pad80(mac_in, bs)
+    if seos_cmac8(mac_key, mac_in, encr_alg) != cmac:
+        raise ValueError("GET DATA response CMAC mismatch")
+    if not objects or objects[0] != 0x85:
+        raise ValueError("GET DATA response is missing 85")
+    if objects[1] < 0x80:
+        clen = objects[1]
+        cstart = 2
+    elif objects[1] == 0x81 and len(objects) > 2:
+        clen = objects[2]
+        cstart = 3
+    else:
+        raise ValueError("GET DATA cryptogram length is invalid")
+    cryptogram = objects[cstart : cstart + clen]
+    if len(cryptogram) != clen:
+        raise ValueError("GET DATA cryptogram is truncated")
+    return seos_iso7816_unpad80(seos_decrypt_cbc(enc_key, cryptogram, encr_alg))
+
+
+def seos_wrap_get_data_capdu(
+    enc_key: bytes,
+    mac_key: bytes,
+    rnd_icc: bytes,
+    rnd_ifd: bytes,
+    tag: bytes,
+    encr_alg: int,
+) -> bytes:
+    """GET DATA CAPDU with 85/97/8E. Command MAC uses the first counter step."""
+    bs = _seos_block_size(encr_alg)
+    header = bytes([0x0C, 0xCB, 0x3F, 0xFF])
+    field = bytes([0x5C, len(tag)]) + bytes(tag)
+    cryptogram = seos_encrypt_cbc(enc_key, seos_iso7816_pad80(field, bs), encr_alg)
+    objects = (
+        bytes([0x85])
+        + seos_ber_length(len(cryptogram))
+        + cryptogram
+        + bytes([0x97, 0x00])
+    )
+    padded_header = bytearray(bs)
+    padded_header[:4] = header
+    padded_header[4] = 0x80
+    counter = seos_counter_inc(seos_sm_counter(rnd_icc, rnd_ifd, encr_alg))
+    mac_in = bytes(counter) + bytes(padded_header) + objects
+    if len(mac_in) % bs:
+        mac_in = seos_iso7816_pad80(mac_in, bs)
+    cmac = seos_cmac8(mac_key, mac_in, encr_alg)
+    body = objects + bytes([0x8E, 0x08]) + cmac
+    return header + bytes([len(body)]) + body
 
 
 def seos_sm_mac_objects(body: bytes) -> tuple:

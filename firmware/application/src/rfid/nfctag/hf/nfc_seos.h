@@ -12,6 +12,7 @@
 #define SEOS_WRITEKEY_MAGIC   0x574B5931u  /* "WKY1" — ADF write master after GDF */
 #define SEOS_OBJECTS_MAGIC    0x314A424Fu  /* "OBJ1" — extra ADF objects after write key */
 #define SEOS_ADF_MAGIC        0x31464441u  /* "ADF1" — extra AID + second ADF after objects */
+#define SEOS_RND_MAGIC        0x31444E52u  /* "RND1" — optional static RND.ICC after ADF2 */
 #define SEOS_KEYSLOT_WRITE    0x02
 #define NFC_TAG_SEOS_EXTRA_MAX 3
 #define NFC_TAG_SEOS_AID_MAX  16
@@ -90,6 +91,13 @@ typedef struct __attribute__((packed)) {
     uint8_t adf2_tag_len;
     uint8_t adf2_data[NFC_TAG_SEOS_DATA_MAX];
     uint8_t adf2_data_len;
+
+    /* Optional static GA1 challenge. Appended after ADF2 so older slots
+     * keep a valid prefix; loadcb leaves rnd_icc_len=0 (random) when
+     * magic is missing. HID ADP default-keyset uses 0181E43801010201. */
+    uint32_t rnd_magic;
+    uint8_t rnd_icc[8];
+    uint8_t rnd_icc_len;
 }
 nfc_tag_seos_information_t;
 
@@ -108,6 +116,8 @@ void seos_apply_empty_objects(nfc_tag_seos_information_t *info);
 bool seos_objects_valid(const nfc_tag_seos_information_t *info);
 void seos_apply_empty_adf2(nfc_tag_seos_information_t *info);
 bool seos_adf2_valid(const nfc_tag_seos_information_t *info);
+void seos_apply_random_rnd(nfc_tag_seos_information_t *info);
+bool seos_rnd_valid(const nfc_tag_seos_information_t *info);
 const uint8_t *seos_auth_master_for_keyslot(const nfc_tag_seos_information_t *info, uint8_t keyslot);
 
 #endif

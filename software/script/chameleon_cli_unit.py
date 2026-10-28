@@ -57,7 +57,9 @@ from chameleon_seos import (
     add_seos_alg_args,
     add_seos_gdf_args,
     add_seos_adf2_args,
+    add_seos_adf2_key_args,
     add_seos_object_arg,
+    add_seos_rnd_arg,
     add_seos_write_key_arg,
     format_seos_eview,
     parse_seos_encr_alg,
@@ -11497,6 +11499,7 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
         add_seos_gdf_args(parser)
         add_seos_object_arg(parser)
         add_seos_adf2_args(parser)
+        add_seos_rnd_arg(parser)
         return parser
 
     def on_exec(self, args: argparse.Namespace):
@@ -11536,6 +11539,7 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
             and args.adf2_div is None
             and args.adf2_data is None
             and args.adf2_tag is None
+            and args.rnd_icc is None
             and change_requested is False
         ):
             print(color_string((CR, "Error: No changes were requested.")))
@@ -11681,6 +11685,24 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
             )
             return
 
+        rnd_icc = seos_data.get("rnd_icc")
+        if args.rnd_icc is not None:
+            if args.rnd_icc.lower() == "random":
+                rnd_icc = None
+            else:
+                try:
+                    rnd_icc = bytes.fromhex(args.rnd_icc)
+                except ValueError as err:
+                    print(color_string((CR, f"Error: invalid RND.ICC: {err}")))
+                    return
+                if len(rnd_icc) != 8:
+                    print(
+                        color_string(
+                            (CR, "Error: RND.ICC must be 8 bytes (or 'random').")
+                        )
+                    )
+                    return
+
         self.cmd.seos_write_emu_data(
             data=data,
             oid=oid,
@@ -11696,6 +11718,7 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
             adf2_diversifier=adf2_diversifier,
             adf2_tag=adf2_tag,
             adf2_data=adf2_data,
+            rnd_icc=rnd_icc,
         )
 
 
@@ -11730,6 +11753,7 @@ class HFSeosKeys(SlotIndexArgsAndGoUnit, DeviceRequiredUnit):
             help="PrivMac key (16 bytes)",
         )
         add_seos_write_key_arg(parser)
+        add_seos_adf2_key_args(parser)
         return parser
 
     def on_exec(self, args: argparse.Namespace):
@@ -11776,6 +11800,58 @@ class HFSeosKeys(SlotIndexArgsAndGoUnit, DeviceRequiredUnit):
                 )
                 return
 
+        adf2_auth = adf2_privenc = adf2_privmac = adf2_auth_write = None
+        adf2_any = (
+            args.adf2_auth is not None
+            or args.adf2_privenc is not None
+            or args.adf2_privmac is not None
+            or args.adf2_write is not None
+        )
+        if adf2_any:
+            if (
+                args.adf2_auth is None
+                or args.adf2_privenc is None
+                or args.adf2_privmac is None
+            ):
+                print(
+                    color_string(
+                        (
+                            CR,
+                            "Error: --adf2-auth, --adf2-privenc, and --adf2-privmac "
+                            "must be set together.",
+                        )
+                    )
+                )
+                return
+            adf2_auth = bytes.fromhex(args.adf2_auth)
+            adf2_privenc = bytes.fromhex(args.adf2_privenc)
+            adf2_privmac = bytes.fromhex(args.adf2_privmac)
+            if len(adf2_auth) != 16 or len(adf2_privenc) != 16 or len(adf2_privmac) != 16:
+                print(
+                    color_string((CR, "Error: ADF2 keys must be 16 bytes each."))
+                )
+                return
+            if args.adf2_write is not None:
+                adf2_auth_write = bytes.fromhex(args.adf2_write)
+                if len(adf2_auth_write) != 16:
+                    print(
+                        color_string(
+                            (
+                                CR,
+                                "Error: invalid ADF2 write-auth key length. "
+                                "Accepts 16 bytes.",
+                            )
+                        )
+                    )
+                    return
+
         self.cmd.seos_write_emu_keys(
-            auth=auth, privenc=privenc, privmac=privmac, auth_write=auth_write
+            auth=auth,
+            privenc=privenc,
+            privmac=privmac,
+            auth_write=auth_write,
+            adf2_auth=adf2_auth,
+            adf2_privenc=adf2_privenc,
+            adf2_privmac=adf2_privmac,
+            adf2_auth_write=adf2_auth_write,
         )

@@ -303,7 +303,12 @@ static void seos_rng_fill(uint8_t *buf, uint8_t len) {
 }
 
 static void seos_refresh_session(void) {
-    seos_rng_fill(RND_ICC, sizeof(RND_ICC));
+    if (m_tag_information != NULL && seos_rnd_valid(m_tag_information) &&
+        m_tag_information->rnd_icc_len == 8) {
+        memcpy(RND_ICC, m_tag_information->rnd_icc, 8);
+    } else {
+        seos_rng_fill(RND_ICC, sizeof(RND_ICC));
+    }
     seos_rng_fill(KEY_ICC, sizeof(KEY_ICC));
     memset(RND_IFD, 0, sizeof(RND_IFD));
     memset(KEY_IFD, 0, sizeof(KEY_IFD));
@@ -441,6 +446,17 @@ bool seos_adf2_valid(const nfc_tag_seos_information_t *info) {
            info->adf2_oid_len <= NFC_TAG_SEOS_OID_MAX &&
            info->adf2_diversifier_len <= NFC_TAG_SEOS_DIVERSIFIER_MAX &&
            info->adf2_tag_len <= NFC_TAG_SEOS_DATA_TAG_MAX;
+}
+
+void seos_apply_random_rnd(nfc_tag_seos_information_t *info) {
+    info->rnd_magic = SEOS_RND_MAGIC;
+    info->rnd_icc_len = 0;
+    memset(info->rnd_icc, 0, sizeof(info->rnd_icc));
+}
+
+bool seos_rnd_valid(const nfc_tag_seos_information_t *info) {
+    return info->rnd_magic == SEOS_RND_MAGIC &&
+           (info->rnd_icc_len == 0 || info->rnd_icc_len == 8);
 }
 
 static bool seos_adf2_selected(void) {
@@ -1438,6 +1454,9 @@ int nfc_tag_seos_data_loadcb(tag_specific_type_t type, tag_data_buffer_t *buffer
     if (!seos_adf2_valid(m_tag_information)) {
         seos_apply_empty_adf2(m_tag_information);
     }
+    if (!seos_rnd_valid(m_tag_information)) {
+        seos_apply_random_rnd(m_tag_information);
+    }
     ulc_3des_init();
     memcpy(session_uid, m_tag_information->res_coll.uid, sizeof(session_uid));
     seos_refresh_session();
@@ -1510,6 +1529,7 @@ bool nfc_tag_seos_data_factory(uint8_t slot, tag_specific_type_t tag_type) {
     seos_apply_default_writekey(&info);
     seos_apply_empty_objects(&info);
     seos_apply_empty_adf2(&info);
+    seos_apply_random_rnd(&info);
 
     fds_slot_record_map_t map_info;
     get_fds_map_by_slot_sense_type_for_dump(slot, TAG_SENSE_HF, &map_info);
