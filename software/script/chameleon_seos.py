@@ -563,12 +563,14 @@ def seos_session_keys(
 
 
 def seos_ber_length(n: int) -> bytes:
-    """ISO7816 BER length. Values 128-255 need the 0x81 long form."""
-    if n < 0 or n > 255:
+    """ISO7816 BER length. 128-255 use 0x81; 256+ use 0x82."""
+    if n < 0 or n > 65535:
         raise ValueError("BER length out of range")
     if n < 128:
         return bytes([n])
-    return bytes([0x81, n])
+    if n < 256:
+        return bytes([0x81, n])
+    return bytes([0x82, (n >> 8) & 0xFF, n & 0xFF])
 
 
 def seos_iblock_reassemble(parts: Iterable[bytes]) -> bytes:
@@ -642,6 +644,13 @@ def seos_iso7816_retry_le(sw: int) -> Optional[int]:
     if (sw >> 8) == 0x6C:
         return sw & 0xFF
     return None
+
+
+def seos_round_to_next(value: int, step: int) -> int:
+    """Pad length to the next cipher block. Must not truncate at 255."""
+    if step <= 0 or value % step == 0:
+        return value
+    return value + step - (value % step)
 
 
 def seos_iso7816_leftover_retry(
@@ -822,6 +831,9 @@ def seos_unwrap_get_data_rapdu(
     elif objects[1] == 0x81 and len(objects) > 2:
         clen = objects[2]
         cstart = 3
+    elif objects[1] == 0x82 and len(objects) > 3:
+        clen = (objects[2] << 8) | objects[3]
+        cstart = 4
     else:
         raise ValueError("GET DATA cryptogram length is invalid")
     cryptogram = objects[cstart : cstart + clen]

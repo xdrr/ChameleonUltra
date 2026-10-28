@@ -45,6 +45,7 @@ from chameleon_seos import (  # noqa: E402
     seos_get_response_apdu,
     seos_iso7816_continue,
     seos_iso7816_leftover_retry,
+    seos_round_to_next,
     seos_iso7816_more_sw,
     seos_iso7816_retry_le,
     seos_iso7816_split_response,
@@ -378,6 +379,19 @@ class TestSeosBerLength(unittest.TestCase):
     def test_long_form_for_large_cryptogram(self):
         self.assertEqual(seos_ber_length(224), bytes([0x81, 224]))
         self.assertEqual(seos_ber_length(255), bytes([0x81, 255]))
+        self.assertEqual(seos_ber_length(272), bytes([0x82, 0x01, 0x10]))
+
+
+class TestSeosRoundToNext(unittest.TestCase):
+    def test_255_byte_object_pads_past_uint8(self):
+        # tag(2)+len(1)+255 = 258, AES block 16 → 272, not a uint8 wrap
+        self.assertEqual(seos_round_to_next(258, 16), 272)
+        self.assertEqual(seos_round_to_next(258, 8), 264)
+
+    def test_small_and_aligned_lengths(self):
+        self.assertEqual(seos_round_to_next(5, 16), 16)
+        self.assertEqual(seos_round_to_next(16, 16), 16)
+        self.assertEqual(seos_round_to_next(0, 16), 0)
 
 
 class TestSeosSessionKeys(unittest.TestCase):

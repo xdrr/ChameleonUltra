@@ -19,6 +19,7 @@ This project uses the changelog in accordance with [keepchangelog](http://keepac
  - SEOS emulator: optional static GA1 RND.ICC (`eload --rnd-icc`); default stays random per field
  - SEOS CLI: `hf seos keys --adf2-auth/--adf2-privenc/--adf2-privmac/--adf2-write` loads distinct ADF2 keys without copying the primary set
  - SEOS host: ISO7816 leftover retry (`6C xx` then GET RESPONSE) and 2K3DES GET DATA wrap/unwrap
+ - SEOS emulator: GET DATA reply length and BER length use 16-bit values so 255-byte objects pad to 272 instead of wrapping a uint8_t
 
 ## [v2.3.0][2026-10-24]
  - Added Farpointe/Pyramid LF protocol support: read and emulate (FSK2a, RF/50)

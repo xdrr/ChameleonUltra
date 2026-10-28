@@ -43,12 +43,11 @@ static uint8_t block_size(uint8_t algorithm) {
     }
 }
 
-static uint8_t round_to_next(uint8_t value, uint8_t step) {
-    if (value % step == 0) {
+static uint16_t round_to_next(uint16_t value, uint16_t step) {
+    if (step == 0 || (value % step) == 0) {
         return value;
-    } else {
-        return value + step - (value % step);
     }
+    return (uint16_t)(value + step - (value % step));
 }
 
 static nrf_crypto_aes_context_t nrf_aes_ctx;
@@ -564,14 +563,20 @@ static bool seos_read_ber_tag(const uint8_t *data, uint16_t end, uint16_t *offse
 
 #define SEOS_MAX_REQUESTED_TAGS 4
 
-static uint8_t seos_put_ber_len(uint8_t *out, uint8_t n) {
+static uint8_t seos_put_ber_len(uint8_t *out, uint16_t n) {
     if (n < 0x80) {
-        out[0] = n;
+        out[0] = (uint8_t)n;
         return 1;
     }
-    out[0] = 0x81;
-    out[1] = n;
-    return 2;
+    if (n < 0x100) {
+        out[0] = 0x81;
+        out[1] = (uint8_t)n;
+        return 2;
+    }
+    out[0] = 0x82;
+    out[1] = (uint8_t)(n >> 8);
+    out[2] = (uint8_t)n;
+    return 3;
 }
 
 static bool seos_parse_requested_tags(const uint8_t *data, uint16_t data_len,
@@ -1325,7 +1330,7 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                     }
 
                     if (reply_idx > 0) {
-                        uint8_t reply_len = (uint8_t)round_to_next(reply_idx, bs);
+                        uint16_t reply_len = round_to_next(reply_idx, bs);
                         if (reply_len > WORK_BUFFER_SIZE) {
                             NRF_LOG_ERROR("Seos: Get Data failed: Unable to generate reply: too long.");
                             break;
@@ -1342,7 +1347,7 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                             break;
                         }
 
-                        uint8_t len_octets = (reply_len < 0x80) ? 1 : 2;
+                        uint8_t len_octets = (reply_len < 0x80) ? 1 : ((reply_len < 0x100) ? 2 : 3);
                         if (1 + len_octets + reply_len + 4 + 2 + recvd_cmac_length > NFC_14A_4_MAX_APDU) {
                             NRF_LOG_ERROR("Seos: Get Data failed: Response too large for buffer.");
                             break;
