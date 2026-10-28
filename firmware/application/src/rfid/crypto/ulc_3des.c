@@ -110,6 +110,9 @@ static uint64_t des_permute(uint64_t in, const uint8_t *table, int n, int in_bit
 }
 
 static uint32_t SP[8][64];
+static uint64_t E_TAB[4][256];
+static uint64_t IP_TAB[8][256];
+static uint64_t FP_TAB[8][256];
 static bool sp_ready = false;
 
 static void des_init_sp(void) {
@@ -122,7 +125,32 @@ static void des_init_sp(void) {
             SP[j][v] = (uint32_t)des_permute(pre, P_PERM, 32, 32);
         }
     }
+    for (int b = 0; b < 8; b++) {
+        for (int v = 0; v < 256; v++) {
+            uint64_t in = ((uint64_t)v) << (56 - 8 * b);
+            IP_TAB[b][v] = des_permute(in, IP, 64, 64);
+            FP_TAB[b][v] = des_permute(in, FP, 64, 64);
+        }
+    }
+    for (int b = 0; b < 4; b++) {
+        for (int v = 0; v < 256; v++) {
+            uint64_t in = ((uint64_t)v) << (24 - 8 * b);
+            E_TAB[b][v] = des_permute(in, E_BITS, 48, 32);
+        }
+    }
     sp_ready = true;
+}
+
+static uint64_t des_apply8(uint64_t in, const uint64_t tab[8][256]) {
+    return tab[0][(in >> 56) & 0xFF] | tab[1][(in >> 48) & 0xFF] |
+           tab[2][(in >> 40) & 0xFF] | tab[3][(in >> 32) & 0xFF] |
+           tab[4][(in >> 24) & 0xFF] | tab[5][(in >> 16) & 0xFF] |
+           tab[6][(in >> 8) & 0xFF] | tab[7][in & 0xFF];
+}
+
+static uint64_t des_expand(uint32_t r) {
+    return E_TAB[0][(r >> 24) & 0xFF] | E_TAB[1][(r >> 16) & 0xFF] |
+           E_TAB[2][(r >> 8) & 0xFF] | E_TAB[3][r & 0xFF];
 }
 
 static void des_setkey(des_ctx_t *ctx, const uint8_t key[8]) {
@@ -149,7 +177,7 @@ static void des_setkey(des_ctx_t *ctx, const uint8_t key[8]) {
 }
 
 static uint32_t des_feistel(uint32_t r, const uint8_t subkey[6]) {
-    uint64_t er = des_permute(r, E_BITS, 48, 32);
+    uint64_t er = des_expand(r);
 
     uint64_t k = 0;
     for (int i = 0; i < 6; i++) {
@@ -175,7 +203,7 @@ static void des_crypt_block(const des_ctx_t *ctx, const uint8_t in[8], uint8_t o
         block = (block << 8) | in[i];
     }
 
-    block = des_permute(block, IP, 64, 64);
+    block = des_apply8(block, IP_TAB);
     uint32_t l = (uint32_t)(block >> 32);
     uint32_t r = (uint32_t)(block & 0xFFFFFFFFUL);
 
@@ -187,7 +215,7 @@ static void des_crypt_block(const des_ctx_t *ctx, const uint8_t in[8], uint8_t o
     }
 
     uint64_t pre = (((uint64_t)r) << 32) | (uint64_t)l;
-    uint64_t res = des_permute(pre, FP, 64, 64);
+    uint64_t res = des_apply8(pre, FP_TAB);
 
     for (int i = 7; i >= 0; i--) {
         out[i] = (uint8_t)(res & 0xFF);
@@ -222,20 +250,32 @@ static void tdes_ecb_decrypt(const tdes_ctx_t *ctx, const uint8_t in[8], uint8_t
     memcpy(out, t, 8);
 }
 
+static tdes_ctx_t g_tdes_ctx;
+static uint8_t g_tdes_key[16];
+static bool g_tdes_ready = false;
+
+static tdes_ctx_t *tdes_ctx_for_key(const uint8_t key[16]) {
+    if (!g_tdes_ready || memcmp(g_tdes_key, key, 16) != 0) {
+        tdes_setkey(&g_tdes_ctx, key);
+        memcpy(g_tdes_key, key, 16);
+        g_tdes_ready = true;
+    }
+    return &g_tdes_ctx;
+}
+
 void ulc_tdes_enc_cbc(uint8_t *out, const uint8_t *in, size_t len, const uint8_t key[16], uint8_t iv[8]) {
     if (len % 8) {
         return;
     }
 
-    tdes_ctx_t ctx;
-    tdes_setkey(&ctx, key);
+    tdes_ctx_t *ctx = tdes_ctx_for_key(key);
 
     for (size_t off = 0; off < len; off += 8) {
         uint8_t blk[8];
         for (int i = 0; i < 8; i++) {
             blk[i] = (uint8_t)(in[off + i] ^ iv[i]);
         }
-        tdes_ecb_encrypt(&ctx, blk, out + off);
+        tdes_ecb_encrypt(ctx, blk, out + off);
         memcpy(iv, out + off, 8);
     }
 }
@@ -245,13 +285,12 @@ void ulc_tdes_dec_cbc(uint8_t *out, const uint8_t *in, size_t len, const uint8_t
         return;
     }
 
-    tdes_ctx_t ctx;
-    tdes_setkey(&ctx, key);
+    tdes_ctx_t *ctx = tdes_ctx_for_key(key);
 
     for (size_t off = 0; off < len; off += 8) {
         uint8_t cipher[8];
         memcpy(cipher, in + off, 8);
-        tdes_ecb_decrypt(&ctx, cipher, out + off);
+        tdes_ecb_decrypt(ctx, cipher, out + off);
         for (int i = 0; i < 8; i++) {
             out[off + i] = (uint8_t)(out[off + i] ^ iv[i]);
         }

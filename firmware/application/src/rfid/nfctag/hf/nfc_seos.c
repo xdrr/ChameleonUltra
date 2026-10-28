@@ -1438,6 +1438,7 @@ int nfc_tag_seos_data_loadcb(tag_specific_type_t type, tag_data_buffer_t *buffer
     if (!seos_adf2_valid(m_tag_information)) {
         seos_apply_empty_adf2(m_tag_information);
     }
+    ulc_3des_init();
     memcpy(session_uid, m_tag_information->res_coll.uid, sizeof(session_uid));
     seos_refresh_session();
 
