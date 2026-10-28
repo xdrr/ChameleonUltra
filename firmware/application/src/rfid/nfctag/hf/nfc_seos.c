@@ -866,6 +866,12 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
             if (m_tcl_session_state.m_apdu_len >= 5) {
                 le = receivedCmd[4];
             }
+            if (le != 0 && seos_pending_len <= 255 && le != seos_pending_len) {
+                m_tcl_session_state.m_resp_len = 0;
+                apdu_status[0] = 0x6C;
+                apdu_status[1] = (uint8_t)seos_pending_len;
+                break;
+            }
             uint16_t asked = (le == 0) ? 256 : le;
             uint16_t room = (SEOS_APDU_FRAME_MAX > 2) ? (uint16_t)(SEOS_APDU_FRAME_MAX - 2) : 0;
             if (room > asked) {

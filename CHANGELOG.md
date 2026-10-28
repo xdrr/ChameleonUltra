@@ -12,6 +12,7 @@ This project uses the changelog in accordance with [keepchangelog](http://keepac
  - SEOS emulator: bad secure-messaging objects return 6987/6988 and drop the session; command MAC covers protected Le (`97`)
  - SEOS emulator: reassemble chained I-blocks and continue oversized GET DATA with `61 xx` / `00 C0` GET RESPONSE
  - SEOS emulator: store extra ADF objects; GET DATA accepts `4D` lists and answers unknown tags with empty success; `hf seos eload --object`
+ - SEOS emulator: GET RESPONSE with a non-zero wrong Le returns `6C xx` and keeps the pending body
 
 ## [v2.3.0][2026-10-24]
  - Added Farpointe/Pyramid LF protocol support: read and emulate (FSK2a, RF/50)

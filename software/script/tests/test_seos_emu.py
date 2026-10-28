@@ -40,6 +40,7 @@ from chameleon_seos import (  # noqa: E402
     seos_iso7816_continue,
     seos_iso7816_more_sw,
     seos_iso7816_split_response,
+    seos_iso7816_wrong_le,
     seos_parse_object_arg,
     seos_parse_requested_tags,
     seos_sm_mac_objects,
@@ -332,14 +333,34 @@ class TestSeosGetResponse(unittest.TestCase):
 
     def test_get_response_continues_then_9000(self):
         leftover = bytes(range(20))
-        chunk, rest, sw = seos_iso7816_continue(leftover, le=10, max_frame=32)
-        self.assertEqual(chunk, leftover[:10])
-        self.assertEqual(rest, leftover[10:])
+        chunk, rest, sw = seos_iso7816_continue(leftover, le=0, max_frame=16)
+        self.assertEqual(chunk, leftover[:14])
+        self.assertEqual(rest, leftover[14:])
         self.assertEqual(sw >> 8, 0x61)
         chunk, rest, sw = seos_iso7816_continue(rest, le=0, max_frame=32)
-        self.assertEqual(chunk, leftover[10:])
+        self.assertEqual(chunk, leftover[14:])
         self.assertEqual(rest, b"")
         self.assertEqual(sw, 0x9000)
+
+    def test_wrong_le_returns_6c_and_keeps_pending(self):
+        leftover = bytes(range(20))
+        chunk, rest, sw = seos_iso7816_continue(leftover, le=10, max_frame=32)
+        self.assertEqual(chunk, b"")
+        self.assertEqual(rest, leftover)
+        self.assertEqual(sw, 0x6C14)
+
+    def test_matching_le_is_not_wrong(self):
+        leftover = bytes(range(20))
+        chunk, rest, sw = seos_iso7816_continue(leftover, le=20, max_frame=32)
+        self.assertEqual(chunk, leftover)
+        self.assertEqual(rest, b"")
+        self.assertEqual(sw, 0x9000)
+
+    def test_wrong_le_helper(self):
+        self.assertIsNone(seos_iso7816_wrong_le(20, 0))
+        self.assertIsNone(seos_iso7816_wrong_le(20, 20))
+        self.assertEqual(seos_iso7816_wrong_le(20, 10), 0x6C14)
+        self.assertEqual(seos_iso7816_wrong_le(64, 8), 0x6C40)
 
     def test_get_response_le_zero_means_256(self):
         leftover = bytes(range(40))

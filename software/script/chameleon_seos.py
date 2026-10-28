@@ -390,6 +390,15 @@ def seos_iblock_reassemble(parts: Iterable[bytes]) -> bytes:
     return b"".join(bytes(part) for part in chunks)
 
 
+def seos_iso7816_wrong_le(available: int, le: int) -> Optional[int]:
+    """ISO7816 6C xx when a non-zero Le is not the exact remaining length."""
+    if le == 0 or available <= 0 or available > 255:
+        return None
+    if le != available:
+        return 0x6C00 | available
+    return None
+
+
 def seos_iso7816_more_sw(remaining: int) -> int:
     """ISO7816 61 xx: xx is leftover bytes, or 00 when more than 255 remain."""
     if remaining <= 0:
@@ -423,6 +432,9 @@ def seos_iso7816_continue(
         raise ValueError("ISO7816 frame is too small")
     if not leftover:
         return b"", b"", 0x6A86
+    wrong = seos_iso7816_wrong_le(len(leftover), le)
+    if wrong is not None:
+        return b"", bytes(leftover), wrong
     asked = 256 if le == 0 else le
     room = max_frame - 2
     if room > asked:
