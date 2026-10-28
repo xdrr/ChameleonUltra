@@ -10,6 +10,7 @@ This project uses the changelog in accordance with [keepchangelog](http://keepac
  - SEOS emulator: P2=02 mutual-auth uses a second write-auth master; `hf seos keys --write` loads it
  - SEOS emulator: accept UPDATE DATA (`0C DB`) and persist the named object into emulator memory
  - SEOS emulator: bad secure-messaging objects return 6987/6988 and drop the session; command MAC covers protected Le (`97`)
+ - SEOS emulator: reassemble chained I-blocks and continue oversized GET DATA with `61 xx` / `00 C0` GET RESPONSE
 
 ## [v2.3.0][2026-10-24]
  - Added Farpointe/Pyramid LF protocol support: read and emulate (FSK2a, RF/50)

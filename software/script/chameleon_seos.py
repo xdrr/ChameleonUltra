@@ -282,6 +282,57 @@ def seos_parse_put_object(
     raise ValueError("UPDATE DATA object is truncated")
 
 
+def seos_iblock_reassemble(parts: Iterable[bytes]) -> bytes:
+    """Concatenate ISO14443-4 chained I-block INF payloads into one APDU."""
+    chunks = list(parts)
+    if not chunks:
+        raise ValueError("I-block chain is empty")
+    return b"".join(bytes(part) for part in chunks)
+
+
+def seos_iso7816_more_sw(remaining: int) -> int:
+    """ISO7816 61 xx: xx is leftover bytes, or 00 when more than 255 remain."""
+    if remaining <= 0:
+        return 0x9000
+    if remaining > 255:
+        return 0x6100
+    return 0x6100 | remaining
+
+
+def seos_iso7816_split_response(
+    body: bytes, max_frame: int
+) -> tuple:
+    """Split a wrapped RAPDU so one T=CL frame can carry it.
+
+    Two bytes of every frame are the status word. What does not fit is
+    kept for GET RESPONSE (00 C0).
+    """
+    if max_frame < 2:
+        raise ValueError("ISO7816 frame is too small")
+    room = max_frame - 2
+    if len(body) <= room:
+        return bytes(body), b"", 0x9000
+    return bytes(body[:room]), bytes(body[room:]), seos_iso7816_more_sw(len(body) - room)
+
+
+def seos_iso7816_continue(
+    leftover: bytes, le: int, max_frame: int
+) -> tuple:
+    """Serve GET RESPONSE. Le 0 asks for 256. Nothing pending is 6A86."""
+    if max_frame < 2:
+        raise ValueError("ISO7816 frame is too small")
+    if not leftover:
+        return b"", b"", 0x6A86
+    asked = 256 if le == 0 else le
+    room = max_frame - 2
+    if room > asked:
+        room = asked
+    chunk = leftover[:room]
+    rest = leftover[room:]
+    sw = seos_iso7816_more_sw(len(rest)) if rest else 0x9000
+    return bytes(chunk), bytes(rest), sw
+
+
 def seos_sm_mac_objects(body: bytes) -> tuple:
     """Split an SM body into DOs covered by the MAC (including 97) and the 8E CMAC."""
     offset = 0

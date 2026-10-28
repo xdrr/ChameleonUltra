@@ -157,7 +157,7 @@ static void seos_kdf(bool forEncryption, uint8_t *masterKey, uint8_t keyslot, ui
     generate_cmac(masterKey, work_buffer, 19 + adfoid_len + diversifier_len, out, SEOS_ENCRYPTION_AES);
 }
 
-#define WORK_BUFFER_SIZE 0x80
+#define WORK_BUFFER_SIZE 0x200
 static uint8_t work_buffer_a[WORK_BUFFER_SIZE];
 static uint8_t work_buffer_b[WORK_BUFFER_SIZE];
 
@@ -180,9 +180,17 @@ static uint8_t KEY_IFD[16] = { 0x00 };
 static uint8_t diver_encr_key[16] = { 0x00 };
 static uint8_t diver_cmac_key[16] = { 0x00 };
 static bool seos_sm_active = false;
+static uint8_t seos_pending[NFC_14A_4_MAX_APDU];
+static uint16_t seos_pending_len = 0;
 
 #define SEOS_SW_SM_MISSING    0x6987
 #define SEOS_SW_SM_INCORRECT  0x6988
+#define SEOS_SW_WRONG_P1P2    0x6A86
+#define SEOS_APDU_FRAME_MAX   NFC_14A_4_INF_MAX
+
+static void seos_pending_clear(void) {
+    seos_pending_len = 0;
+}
 
 /* Per-field anti-collision UID. 4-byte 08 RIDs are randomized so the
  * stored slot UID is not a static air-interface fingerprint. */
@@ -219,6 +227,7 @@ static void seos_refresh_session(void) {
     memset(diver_encr_key, 0, sizeof(diver_encr_key));
     memset(diver_cmac_key, 0, sizeof(diver_cmac_key));
     seos_sm_active = false;
+    seos_pending_clear();
 
     if (m_tag_information == NULL) {
         return;
@@ -235,11 +244,39 @@ static void seos_sm_fail(uint8_t *apdu_status, uint16_t sw) {
     /* ISO7816: missing/incorrect SM objects are answered in the clear and
      * end the session so the counters cannot be reused. */
     seos_sm_active = false;
+    seos_pending_clear();
     memset(diver_encr_key, 0, sizeof(diver_encr_key));
     memset(diver_cmac_key, 0, sizeof(diver_cmac_key));
     m_tcl_session_state.m_resp_len = 0;
     apdu_status[0] = (uint8_t)(sw >> 8);
     apdu_status[1] = (uint8_t)(sw & 0xFF);
+}
+
+/* Send one ISO7816 APDU. If the body plus SW does not fit one T=CL
+ * I-block, keep the tail for GET RESPONSE (00 C0) and return 61 xx. */
+static void seos_commit_response(uint8_t *apdu_status) {
+    uint16_t body_len = m_tcl_session_state.m_resp_len;
+    uint16_t room = (SEOS_APDU_FRAME_MAX > 2) ? (uint16_t)(SEOS_APDU_FRAME_MAX - 2) : 0;
+
+    if (body_len <= room) {
+        m_tcl_session_state.m_resp_buf[body_len] = apdu_status[0];
+        m_tcl_session_state.m_resp_buf[body_len + 1] = apdu_status[1];
+        m_tcl_session_state.m_resp_len = body_len + 2;
+    } else {
+        uint16_t leftover = (uint16_t)(body_len - room);
+        if (leftover > sizeof(seos_pending)) {
+            leftover = sizeof(seos_pending);
+        }
+        memcpy(seos_pending, m_tcl_session_state.m_resp_buf + room, leftover);
+        seos_pending_len = leftover;
+        m_tcl_session_state.m_resp_buf[room] = 0x61;
+        m_tcl_session_state.m_resp_buf[room + 1] = (leftover > 0xFF) ? 0x00 : (uint8_t)leftover;
+        m_tcl_session_state.m_resp_len = room + 2;
+    }
+
+    m_tcl_session_state.m_response_ready = true;
+    NRF_NFCT->FRAMEDELAYMAX = 135600; // 10ms
+    nfc_tag_14a_4_base_respond(&m_tcl_session_state);
 }
 
 /* ------------------------------------------------------------------ */
@@ -677,10 +714,54 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
         }
         break;
 
+        case 0xC0: { // GET RESPONSE
+            if (receivedCmd[2] != 0x00 || receivedCmd[3] != 0x00) {
+                break;
+            }
+            if (seos_pending_len == 0) {
+                if (!seos_sm_active) {
+                    seos_sm_fail(apdu_status, SEOS_SW_SM_INCORRECT);
+                } else {
+                    apdu_status[0] = (uint8_t)(SEOS_SW_WRONG_P1P2 >> 8);
+                    apdu_status[1] = (uint8_t)(SEOS_SW_WRONG_P1P2 & 0xFF);
+                }
+                break;
+            }
+            uint8_t le = 0;
+            if (m_tcl_session_state.m_apdu_len >= 5) {
+                le = receivedCmd[4];
+            }
+            uint16_t asked = (le == 0) ? 256 : le;
+            uint16_t room = (SEOS_APDU_FRAME_MAX > 2) ? (uint16_t)(SEOS_APDU_FRAME_MAX - 2) : 0;
+            if (room > asked) {
+                room = asked;
+            }
+            if (room > seos_pending_len) {
+                room = seos_pending_len;
+            }
+            memcpy(m_tcl_session_state.m_resp_buf, seos_pending, room);
+            if (seos_pending_len > room) {
+                memmove(seos_pending, seos_pending + room, seos_pending_len - room);
+                seos_pending_len = (uint16_t)(seos_pending_len - room);
+            } else {
+                seos_pending_len = 0;
+            }
+            m_tcl_session_state.m_resp_len = room;
+            if (seos_pending_len > 0) {
+                apdu_status[0] = 0x61;
+                apdu_status[1] = (seos_pending_len > 0xFF) ? 0x00 : (uint8_t)seos_pending_len;
+            } else {
+                apdu_status[0] = 0x90;
+                apdu_status[1] = 0x00;
+            }
+        }
+        break;
+
         case 0xDA:   // PUT DATA (PM3 emulator alias)
         case 0xDB:   // UPDATE DATA
         case 0xCB: { // GET DATA
             bool is_put = (receivedCmd[1] == 0xDA || receivedCmd[1] == 0xDB);
+            seos_pending_clear();
 
             uint8_t received_tlv_len = receivedCmd[4];
             uint8_t *received_tlv = &receivedCmd[5];
@@ -908,7 +989,6 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                         break;
                     }
 
-                    // Pre-flight: 2 (cryptogram tag+len) + reply_len + 4 (status) + 2 (CMAC tag+len) + recvd_cmac_length
                     if (2 + reply_len + 4 + 2 + recvd_cmac_length > NFC_14A_4_MAX_APDU) {
                         NRF_LOG_ERROR("Seos: Get Data failed: Response too large for buffer.");
                         break;
@@ -984,17 +1064,7 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
     NRF_LOG_DEBUG("Seos: Responding with %d bytes, SW=%02X%02X.", m_tcl_session_state.m_resp_len, apdu_status[0], apdu_status[1]);
     NRF_LOG_HEXDUMP_DEBUG(m_tcl_session_state.m_resp_buf, m_tcl_session_state.m_resp_len);
 
-    // Add APDU status code to end of response
-    m_tcl_session_state.m_resp_buf[m_tcl_session_state.m_resp_len++] = apdu_status[0];
-    m_tcl_session_state.m_resp_buf[m_tcl_session_state.m_resp_len++] = apdu_status[1];
-    m_tcl_session_state.m_response_ready = true;
-
-    // Increase maximum frame delay
-    // Without this, if the command took too long,
-    //  the nRF firmware will just... never respond
-    NRF_NFCT->FRAMEDELAYMAX = 135600; // 10ms
-
-    nfc_tag_14a_4_base_respond(&m_tcl_session_state);
+    seos_commit_response(apdu_status);
 }
 
 /* ------------------------------------------------------------------ */

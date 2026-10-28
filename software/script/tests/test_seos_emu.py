@@ -34,6 +34,10 @@ from chameleon_seos import (  # noqa: E402
     seos_encr_alg_name,
     seos_hash_alg_name,
     seos_parse_put_object,
+    seos_iblock_reassemble,
+    seos_iso7816_continue,
+    seos_iso7816_more_sw,
+    seos_iso7816_split_response,
     seos_sm_mac_objects,
     unpack_seos_emu_data,
     unpack_seos_emu_keys,
@@ -279,6 +283,66 @@ class TestSeosSecureMessaging(unittest.TestCase):
         with self.assertRaises(ValueError) as err:
             seos_sm_mac_objects(bytes.fromhex("8510" + "11" * 16 + "9700"))
         self.assertEqual(str(err.exception), "missing")
+
+
+class TestSeosIBlockReassembly(unittest.TestCase):
+    def test_reassemble_concatenates_chained_inf(self):
+        first = bytes.fromhex("0CCB3FFF")
+        second = bytes.fromhex("8510" + "11" * 16)
+        self.assertEqual(seos_iblock_reassemble([first, second]), first + second)
+
+    def test_reassemble_single_block_is_identity(self):
+        apdu = bytes.fromhex("00A404000A")
+        self.assertEqual(seos_iblock_reassemble([apdu]), apdu)
+
+    def test_reassemble_rejects_empty(self):
+        with self.assertRaises(ValueError):
+            seos_iblock_reassemble([])
+
+
+class TestSeosGetResponse(unittest.TestCase):
+    def test_short_response_is_one_frame_with_9000(self):
+        body = bytes.fromhex("851011223344")
+        chunk, leftover, sw = seos_iso7816_split_response(body, max_frame=32)
+        self.assertEqual(chunk, body)
+        self.assertEqual(leftover, b"")
+        self.assertEqual(sw, 0x9000)
+
+    def test_oversized_response_returns_61_and_keeps_tail(self):
+        body = bytes(range(40))
+        chunk, leftover, sw = seos_iso7816_split_response(body, max_frame=16)
+        self.assertEqual(chunk, body[:14])
+        self.assertEqual(leftover, body[14:])
+        self.assertEqual(sw, seos_iso7816_more_sw(len(leftover)))
+        self.assertEqual(sw >> 8, 0x61)
+
+    def test_get_response_continues_then_9000(self):
+        leftover = bytes(range(20))
+        chunk, rest, sw = seos_iso7816_continue(leftover, le=10, max_frame=32)
+        self.assertEqual(chunk, leftover[:10])
+        self.assertEqual(rest, leftover[10:])
+        self.assertEqual(sw >> 8, 0x61)
+        chunk, rest, sw = seos_iso7816_continue(rest, le=0, max_frame=32)
+        self.assertEqual(chunk, leftover[10:])
+        self.assertEqual(rest, b"")
+        self.assertEqual(sw, 0x9000)
+
+    def test_get_response_le_zero_means_256(self):
+        leftover = bytes(range(40))
+        chunk, rest, sw = seos_iso7816_continue(leftover, le=0, max_frame=20)
+        self.assertEqual(len(chunk), 18)
+        self.assertEqual(rest, leftover[18:])
+        self.assertEqual(sw, seos_iso7816_more_sw(len(rest)))
+
+    def test_more_sw_uses_zero_when_remaining_exceeds_255(self):
+        self.assertEqual(seos_iso7816_more_sw(20), 0x6114)
+        self.assertEqual(seos_iso7816_more_sw(256), 0x6100)
+
+    def test_get_response_with_nothing_pending_is_empty(self):
+        chunk, rest, sw = seos_iso7816_continue(b"", le=0, max_frame=32)
+        self.assertEqual(chunk, b"")
+        self.assertEqual(rest, b"")
+        self.assertEqual(sw, 0x6A86)
 
 
 if __name__ == "__main__":

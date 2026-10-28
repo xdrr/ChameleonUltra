@@ -159,7 +159,7 @@ static void send_iblock(nfc_tag_14a_4_tcl_state_t *m_tcl_session_state) {
     uint8_t off = 0;
     m_tx_buf[off++] = pcb;
     if (m_tcl_session_state->m_cid_supported) m_tx_buf[off++] = m_tcl_session_state->m_cid & 0x0F;
-    if (len > NFC_14A_4_MAX_APDU) len = NFC_14A_4_MAX_APDU;
+    if (len > NFC_14A_4_INF_MAX) len = NFC_14A_4_INF_MAX;
     memcpy(&m_tx_buf[off], m_tcl_session_state->m_resp_buf, len);
     nfc_tag_14a_tx_bytes(m_tx_buf, off + len, true);
     m_tcl_session_state->m_block_num ^= 1;
@@ -285,16 +285,47 @@ bool nfc_tag_14a_4_base_handler(nfc_tag_14a_4_tcl_state_t *m_tcl_session_state, 
             return false;
         }
 
-        memcpy(m_tcl_session_state->m_apdu_buf, &data[offset], apdu_len);
-        m_tcl_session_state->m_apdu_len    = apdu_len;
-        m_tcl_session_state->m_apdu_pending = true;
-        m_tcl_session_state->m_response_ready = false;
-
         if (more_chain) {
+            if (m_tcl_session_state->m_apdu_chaining) {
+                if ((uint16_t)(m_tcl_session_state->m_apdu_len + apdu_len) > NFC_14A_4_MAX_APDU) {
+                    m_tcl_session_state->m_apdu_chaining = false;
+                    m_tcl_session_state->m_apdu_len = 0;
+                    send_rack(m_tcl_session_state);
+                    return false;
+                }
+                memcpy(m_tcl_session_state->m_apdu_buf + m_tcl_session_state->m_apdu_len,
+                       &data[offset], apdu_len);
+                m_tcl_session_state->m_apdu_len += apdu_len;
+            } else {
+                memcpy(m_tcl_session_state->m_apdu_buf, &data[offset], apdu_len);
+                m_tcl_session_state->m_apdu_len = apdu_len;
+                m_tcl_session_state->m_apdu_chaining = true;
+            }
+            m_tcl_session_state->m_apdu_pending = false;
+            m_tcl_session_state->m_response_ready = false;
             send_rack(m_tcl_session_state);
+            /* Next chained I-block uses the inverted block number. */
+            m_tcl_session_state->m_block_num ^= 1;
             return false;
         }
-        
+
+        if (m_tcl_session_state->m_apdu_chaining) {
+            if ((uint16_t)(m_tcl_session_state->m_apdu_len + apdu_len) > NFC_14A_4_MAX_APDU) {
+                m_tcl_session_state->m_apdu_chaining = false;
+                m_tcl_session_state->m_apdu_len = 0;
+                send_rack(m_tcl_session_state);
+                return false;
+            }
+            memcpy(m_tcl_session_state->m_apdu_buf + m_tcl_session_state->m_apdu_len,
+                   &data[offset], apdu_len);
+            m_tcl_session_state->m_apdu_len += apdu_len;
+            m_tcl_session_state->m_apdu_chaining = false;
+        } else {
+            memcpy(m_tcl_session_state->m_apdu_buf, &data[offset], apdu_len);
+            m_tcl_session_state->m_apdu_len = apdu_len;
+        }
+        m_tcl_session_state->m_apdu_pending = true;
+        m_tcl_session_state->m_response_ready = false;
         return true;
     }
 
@@ -355,6 +386,7 @@ void nfc_tag_14a_4_reset_state(nfc_tag_14a_4_tcl_state_t *m_tcl_session_state) {
     m_tcl_session_state->m_cid_supported  = false;
     m_tcl_session_state->m_cid            = 0;
     m_tcl_session_state->m_apdu_pending   = false;
+    m_tcl_session_state->m_apdu_chaining  = false;
     m_tcl_session_state->m_response_ready = false;
     m_tcl_session_state->m_apdu_len       = 0;
     m_tcl_session_state->m_resp_len       = 0;

@@ -18,8 +18,10 @@
 #include "nfc_14a.h"
 #include "tag_emulation.h"
 
-/* Maximum APDU size (FSCI=8 → FSC=256, minus PCB+CRC = 253) */
-#define NFC_14A_4_MAX_APDU  260  /* max APDU in RAM; flash entries capped at 253 */
+/* One I-block INF is FSCI=8 → FSC=256, minus PCB+CRC = 253.
+ * Reassembled APDUs (chained I-blocks) can exceed one frame. */
+#define NFC_14A_4_INF_MAX   253
+#define NFC_14A_4_MAX_APDU  512  /* reassembled APDU in RAM; one I-block stays ≤ INF_MAX */
 
 /* Static APDU response table — up to 12 pre-configured command/response pairs.
  * Loaded before field activation; firmware responds autonomously without USB. */
@@ -55,6 +57,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  m_cid;
     uint8_t  m_apdu_buf[NFC_14A_4_MAX_APDU];
     uint16_t m_apdu_len;
+    bool     m_apdu_chaining;
     bool     m_apdu_pending;
     uint8_t  m_resp_buf[NFC_14A_4_MAX_APDU];
     uint16_t m_resp_len;
