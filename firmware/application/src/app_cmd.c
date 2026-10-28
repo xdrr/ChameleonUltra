@@ -1339,8 +1339,16 @@ static data_frame_tx_t *cmd_processor_seos_read_emu_data(uint16_t cmd, uint16_t 
     if (!seos_gdf_record_valid(info)) {
         seos_apply_factory_gdf(info);
     }
+    if (!seos_objects_valid(info)) {
+        seos_apply_empty_objects(info);
+    }
 
-    uint8_t output[1+info->diversifier_len + 1+info->oid_len + 1+info->data_tag_len + 1+info->data_len + 2 + 1+info->gdf_oid_len + 1+info->gdf_diversifier_len];
+    uint16_t extra_bytes = 1;
+    for (uint8_t i = 0; i < info->extra_count && i < NFC_TAG_SEOS_EXTRA_MAX; i++) {
+        extra_bytes += 1 + info->extra[i].tag_len + 1 + info->extra[i].data_len;
+    }
+
+    uint8_t output[1+info->diversifier_len + 1+info->oid_len + 1+info->data_tag_len + 1+info->data_len + 2 + 1+info->gdf_oid_len + 1+info->gdf_diversifier_len + extra_bytes];
     uint16_t offset = 0;
 
     output[offset++] = info->data_len;
@@ -1369,6 +1377,16 @@ static data_frame_tx_t *cmd_processor_seos_read_emu_data(uint16_t cmd, uint16_t 
     output[offset++] = info->gdf_diversifier_len;
     memcpy(output+offset, info->gdf_diversifier, info->gdf_diversifier_len);
     offset += info->gdf_diversifier_len;
+
+    output[offset++] = info->extra_count;
+    for (uint8_t i = 0; i < info->extra_count && i < NFC_TAG_SEOS_EXTRA_MAX; i++) {
+        output[offset++] = info->extra[i].tag_len;
+        memcpy(output+offset, info->extra[i].tag, info->extra[i].tag_len);
+        offset += info->extra[i].tag_len;
+        output[offset++] = info->extra[i].data_len;
+        memcpy(output+offset, info->extra[i].data, info->extra[i].data_len);
+        offset += info->extra[i].data_len;
+    }
 
     return data_frame_make(cmd, STATUS_SUCCESS, offset, output);
 }
@@ -1431,6 +1449,39 @@ static data_frame_tx_t *cmd_processor_seos_write_emu_data(uint16_t cmd, uint16_t
         info->gdf_diversifier_len = len;
         memcpy(info->gdf_diversifier, data+offset, len);
         info->gdf_magic = SEOS_GDF_LAYOUT_MAGIC;
+        offset += len;
+    }
+
+    if (offset < length) {
+        uint8_t count = data[offset++];
+        if (count > NFC_TAG_SEOS_EXTRA_MAX) {
+            return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+        }
+        seos_apply_empty_objects(info);
+        for (uint8_t i = 0; i < count; i++) {
+            if (offset >= length) {
+                return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+            }
+            len = data[offset++];
+            if (len == 0 || len > NFC_TAG_SEOS_DATA_TAG_MAX || offset + len > length) {
+                return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+            }
+            info->extra[i].tag_len = len;
+            memcpy(info->extra[i].tag, data+offset, len);
+            offset += len;
+            if (offset >= length) {
+                return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+            }
+            len = data[offset++];
+            if (len == 0 || len > NFC_TAG_SEOS_DATA_MAX || offset + len > length) {
+                return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
+            }
+            info->extra[i].data_len = len;
+            memcpy(info->extra[i].data, data+offset, len);
+            offset += len;
+            info->extra_count = (uint8_t)(i + 1);
+        }
+        info->objects_magic = SEOS_OBJECTS_MAGIC;
     }
 
     return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);

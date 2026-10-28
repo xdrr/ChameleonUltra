@@ -127,6 +127,7 @@ def pack_seos_emu_data(
     encr_alg: int,
     gdf_oid: Optional[bytes] = None,
     gdf_diversifier: Optional[bytes] = None,
+    extras: Optional[Iterable[tuple]] = None,
 ) -> bytes:
     payload = (
         _tlv_put(data)
@@ -137,17 +138,22 @@ def pack_seos_emu_data(
     )
     if gdf_oid is not None and gdf_diversifier is not None:
         payload += _tlv_put(gdf_oid) + _tlv_put(gdf_diversifier)
+        if extras is not None:
+            extra_list = list(extras)
+            payload += bytes([len(extra_list)])
+            for extra_tag, extra_data in extra_list:
+                payload += _tlv_put(bytes(extra_tag)) + _tlv_put(bytes(extra_data))
     return payload
 
 
-def unpack_seos_emu_data(payload: bytes) -> Dict[str, Union[bytes, int]]:
+def unpack_seos_emu_data(payload: bytes) -> Dict[str, Union[bytes, int, List]]:
     data, offset = _tlv_take(payload, 0)
     oid, offset = _tlv_take(payload, offset)
     tag, offset = _tlv_take(payload, offset)
     diversifier, offset = _tlv_take(payload, offset)
     if offset + 2 > len(payload):
         raise ValueError("Truncated SEOS emu payload")
-    parsed: Dict[str, Union[bytes, int]] = {
+    parsed: Dict[str, Union[bytes, int, List]] = {
         "data": data,
         "oid": oid,
         "tag": tag,
@@ -161,6 +167,15 @@ def unpack_seos_emu_data(payload: bytes) -> Dict[str, Union[bytes, int]]:
         gdf_diversifier, offset = _tlv_take(payload, offset)
         parsed["gdf_oid"] = gdf_oid
         parsed["gdf_diversifier"] = gdf_diversifier
+    if offset < len(payload):
+        count = payload[offset]
+        offset += 1
+        extras = []
+        for _ in range(count):
+            extra_tag, offset = _tlv_take(payload, offset)
+            extra_data, offset = _tlv_take(payload, offset)
+            extras.append((extra_tag, extra_data))
+        parsed["extras"] = extras
     return parsed
 
 
@@ -206,6 +221,13 @@ def format_seos_eview(data: Dict[str, Union[bytes, int]]) -> List[str]:
         lines.append(
             f"[=] GDF Diversifier: {bytes(data['gdf_diversifier']).hex().upper()}"
         )
+    extras = data.get("extras")
+    if extras:
+        for extra_tag, extra_data in extras:
+            lines.append(
+                f"[=]      Object: {bytes(extra_tag).hex().upper()} "
+                f"{bytes(extra_data).hex().upper()}"
+            )
     lines.extend(
         [
             f"[=]        Hash: {hash_name} (0x{hash_alg:02X})",
@@ -280,6 +302,75 @@ def seos_parse_put_object(
         if length > 0 and len(plaintext) >= 1 + length:
             return default_tag, plaintext[1 : 1 + length]
     raise ValueError("UPDATE DATA object is truncated")
+
+
+def seos_read_ber_tag(data: bytes, offset: int) -> tuple:
+    if offset >= len(data):
+        raise ValueError("truncated tag")
+    if (data[offset] & 0x1F) == 0x1F:
+        if offset + 1 >= len(data):
+            raise ValueError("truncated tag")
+        return data[offset : offset + 2], offset + 2
+    return data[offset : offset + 1], offset + 1
+
+
+def seos_parse_requested_tags(plaintext: bytes) -> List[bytes]:
+    """GET DATA plaintext is a 5C tag list or a 4D extended header list."""
+    if len(plaintext) < 3 or plaintext[0] not in (0x5C, 0x4D):
+        raise ValueError("GET DATA field is not a tag list")
+    body_len = plaintext[1]
+    if body_len == 0 or len(plaintext) < 2 + body_len:
+        raise ValueError("GET DATA field is truncated")
+    end = 2 + body_len
+    offset = 2
+    tags: List[bytes] = []
+    while offset < end:
+        tag, offset = seos_read_ber_tag(plaintext, offset)
+        if plaintext[0] == 0x4D:
+            if offset >= end or plaintext[offset] != 0x00:
+                raise ValueError("extended header list needs zero lengths")
+            offset += 1
+        tags.append(tag)
+    if plaintext[0] == 0x5C and len(tags) != 1:
+        raise ValueError("tag list names exactly one object")
+    if not tags:
+        raise ValueError("GET DATA field names no tags")
+    return tags
+
+
+def seos_collect_objects(
+    store: Iterable[tuple], tags: Iterable[bytes]
+) -> bytes:
+    """Concatenate stored TLV objects named by the reader. Unknown tags add nothing."""
+    objects = {bytes(tag): bytes(value) for tag, value in store}
+    blob = b""
+    for tag in tags:
+        value = objects.get(bytes(tag))
+        if value is None:
+            continue
+        blob += bytes(tag) + bytes([len(value)]) + value
+    return blob
+
+
+def seos_parse_object_arg(value: str) -> tuple:
+    tag_hex, sep, data_hex = value.partition(":")
+    if not sep or not tag_hex or not data_hex:
+        raise ValueError("object must be <tag>:<hex>")
+    tag = bytes.fromhex(tag_hex)
+    data = bytes.fromhex(data_hex)
+    if not (1 <= len(tag) <= 2) or not (1 <= len(data) <= 255):
+        raise ValueError("object tag is 1-2 bytes and data is 1-255 bytes")
+    return tag, data
+
+
+def add_seos_object_arg(parser) -> None:
+    parser.add_argument(
+        "--object",
+        action="append",
+        default=None,
+        metavar="<tag:hex>",
+        help="Extra ADF object (repeatable), e.g. FF41:DEADBEEF.",
+    )
 
 
 def seos_iblock_reassemble(parts: Iterable[bytes]) -> bytes:

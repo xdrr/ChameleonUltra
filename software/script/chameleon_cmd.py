@@ -2091,6 +2091,7 @@ class ChameleonCMD:
         encr_alg: int,
         gdf_oid: Union[bytes, None] = None,
         gdf_diversifier: Union[bytes, None] = None,
+        extras=None,
     ):
         payload = pack_seos_emu_data(
             data=data,
@@ -2101,6 +2102,7 @@ class ChameleonCMD:
             encr_alg=encr_alg,
             gdf_oid=gdf_oid,
             gdf_diversifier=gdf_diversifier,
+            extras=extras,
         )
 
         if len(payload) > 4096:

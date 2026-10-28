@@ -34,10 +34,13 @@ from chameleon_seos import (  # noqa: E402
     seos_encr_alg_name,
     seos_hash_alg_name,
     seos_parse_put_object,
+    seos_collect_objects,
     seos_iblock_reassemble,
     seos_iso7816_continue,
     seos_iso7816_more_sw,
     seos_iso7816_split_response,
+    seos_parse_object_arg,
+    seos_parse_requested_tags,
     seos_sm_mac_objects,
     unpack_seos_emu_data,
     unpack_seos_emu_keys,
@@ -343,6 +346,86 @@ class TestSeosGetResponse(unittest.TestCase):
         self.assertEqual(chunk, b"")
         self.assertEqual(rest, b"")
         self.assertEqual(sw, 0x6A86)
+
+
+class TestSeosMultiTag(unittest.TestCase):
+    def test_tag_list_names_one(self):
+        self.assertEqual(
+            seos_parse_requested_tags(bytes.fromhex("5C02FF00")),
+            [bytes.fromhex("FF00")],
+        )
+
+    def test_tag_list_rejects_two_tags(self):
+        with self.assertRaises(ValueError):
+            seos_parse_requested_tags(bytes.fromhex("5C04FF00FF41"))
+
+    def test_extended_header_list_one_tag(self):
+        self.assertEqual(
+            seos_parse_requested_tags(bytes.fromhex("4D03FF0000")),
+            [bytes.fromhex("FF00")],
+        )
+
+    def test_extended_header_list_many(self):
+        self.assertEqual(
+            seos_parse_requested_tags(bytes.fromhex("4D06FF4100FF0000")),
+            [bytes.fromhex("FF41"), bytes.fromhex("FF00")],
+        )
+
+    def test_extended_header_list_needs_zero_lengths(self):
+        with self.assertRaises(ValueError):
+            seos_parse_requested_tags(bytes.fromhex("4D03FF0004"))
+        with self.assertRaises(ValueError):
+            seos_parse_requested_tags(bytes.fromhex("4D02FF00"))
+
+    def test_unknown_tag_is_empty_success(self):
+        store = [(bytes.fromhex("FF00"), bytes.fromhex("0500"))]
+        self.assertEqual(seos_collect_objects(store, [bytes.fromhex("FF41")]), b"")
+
+    def test_collect_concatenates_known_tags(self):
+        store = [
+            (bytes.fromhex("FF00"), bytes.fromhex("0500")),
+            (bytes.fromhex("FF41"), bytes.fromhex("AABB")),
+        ]
+        blob = seos_collect_objects(
+            store, [bytes.fromhex("FF41"), bytes.fromhex("FF00")]
+        )
+        self.assertEqual(blob, bytes.fromhex("FF4102AABBFF00020500"))
+
+    def test_parse_object_arg(self):
+        tag, value = seos_parse_object_arg("FF41:AABBCC")
+        self.assertEqual(tag, bytes.fromhex("FF41"))
+        self.assertEqual(value, bytes.fromhex("AABBCC"))
+
+    def test_pack_unpack_extra_objects(self):
+        extras = [(bytes.fromhex("FF41"), bytes.fromhex("DEAD"))]
+        packed = pack_seos_emu_data(
+            data=bytes.fromhex("0500"),
+            oid=SEOS_FACTORY_ADF_OID,
+            tag=bytes.fromhex("FF00"),
+            diversifier=bytes.fromhex("01020304050607"),
+            hash_alg=SEOS_HASH_SHA256,
+            encr_alg=SEOS_ENCR_AES,
+            gdf_oid=SEOS_FACTORY_GDF_OID,
+            gdf_diversifier=SEOS_FACTORY_GDF_DIV,
+            extras=extras,
+        )
+        parsed = unpack_seos_emu_data(packed)
+        self.assertEqual(parsed["extras"], extras)
+
+    def test_eview_prints_extra_objects(self):
+        lines = format_seos_eview(
+            {
+                "data": bytes.fromhex("0500"),
+                "oid": SEOS_FACTORY_ADF_OID,
+                "tag": bytes.fromhex("FF00"),
+                "diversifier": bytes.fromhex("01020304050607"),
+                "hash_alg": SEOS_HASH_SHA256,
+                "encr_alg": SEOS_ENCR_AES,
+                "extras": [(bytes.fromhex("FF41"), bytes.fromhex("DEAD"))],
+            }
+        )
+        text = "\n".join(lines)
+        self.assertIn("Object: FF41 DEAD", text)
 
 
 if __name__ == "__main__":

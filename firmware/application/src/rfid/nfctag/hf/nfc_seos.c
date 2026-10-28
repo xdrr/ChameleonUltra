@@ -322,6 +322,131 @@ bool seos_writekey_valid(const nfc_tag_seos_information_t *info) {
     return info->writekey_magic == SEOS_WRITEKEY_MAGIC;
 }
 
+void seos_apply_empty_objects(nfc_tag_seos_information_t *info) {
+    info->objects_magic = SEOS_OBJECTS_MAGIC;
+    info->extra_count = 0;
+    memset(info->extra, 0, sizeof(info->extra));
+}
+
+bool seos_objects_valid(const nfc_tag_seos_information_t *info) {
+    return info->objects_magic == SEOS_OBJECTS_MAGIC &&
+           info->extra_count <= NFC_TAG_SEOS_EXTRA_MAX;
+}
+
+static bool seos_tag_eq(const uint8_t *a, uint8_t a_len, const uint8_t *b, uint8_t b_len) {
+    return a_len == b_len && a_len > 0 && memcmp(a, b, a_len) == 0;
+}
+
+static bool seos_find_object(const nfc_tag_seos_information_t *info,
+                             const uint8_t *tag, uint8_t tag_len,
+                             const uint8_t **data_out, uint8_t *data_len_out) {
+    if (seos_tag_eq(info->data_tag, info->data_tag_len, tag, tag_len)) {
+        *data_out = info->data;
+        *data_len_out = info->data_len;
+        return true;
+    }
+    for (uint8_t i = 0; i < info->extra_count && i < NFC_TAG_SEOS_EXTRA_MAX; i++) {
+        if (seos_tag_eq(info->extra[i].tag, info->extra[i].tag_len, tag, tag_len)) {
+            *data_out = info->extra[i].data;
+            *data_len_out = info->extra[i].data_len;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool seos_store_named_object(nfc_tag_seos_information_t *info,
+                                    const uint8_t *tag, uint8_t tag_len,
+                                    const uint8_t *value, uint8_t value_len) {
+    if (tag_len == 0 || tag_len > NFC_TAG_SEOS_DATA_TAG_MAX ||
+        value_len == 0 || value_len > NFC_TAG_SEOS_DATA_MAX) {
+        return false;
+    }
+    if (seos_tag_eq(info->data_tag, info->data_tag_len, tag, tag_len) ||
+        info->data_tag_len == 0) {
+        memcpy(info->data_tag, tag, tag_len);
+        info->data_tag_len = tag_len;
+        memcpy(info->data, value, value_len);
+        info->data_len = value_len;
+        return true;
+    }
+    for (uint8_t i = 0; i < info->extra_count && i < NFC_TAG_SEOS_EXTRA_MAX; i++) {
+        if (seos_tag_eq(info->extra[i].tag, info->extra[i].tag_len, tag, tag_len)) {
+            memcpy(info->extra[i].data, value, value_len);
+            info->extra[i].data_len = value_len;
+            return true;
+        }
+    }
+    if (info->extra_count >= NFC_TAG_SEOS_EXTRA_MAX) {
+        return false;
+    }
+    uint8_t idx = info->extra_count;
+    memcpy(info->extra[idx].tag, tag, tag_len);
+    info->extra[idx].tag_len = tag_len;
+    memcpy(info->extra[idx].data, value, value_len);
+    info->extra[idx].data_len = value_len;
+    info->extra_count++;
+    info->objects_magic = SEOS_OBJECTS_MAGIC;
+    return true;
+}
+
+static bool seos_read_ber_tag(const uint8_t *data, uint16_t end, uint16_t *offset,
+                              uint8_t *tag, uint8_t *tag_len) {
+    if (*offset >= end) {
+        return false;
+    }
+    if ((data[*offset] & 0x1F) == 0x1F) {
+        if ((uint16_t)(*offset + 1) >= end) {
+            return false;
+        }
+        tag[0] = data[*offset];
+        tag[1] = data[*offset + 1];
+        *tag_len = 2;
+        *offset = (uint16_t)(*offset + 2);
+        return true;
+    }
+    tag[0] = data[*offset];
+    *tag_len = 1;
+    *offset = (uint16_t)(*offset + 1);
+    return true;
+}
+
+#define SEOS_MAX_REQUESTED_TAGS 4
+
+static bool seos_parse_requested_tags(const uint8_t *data, uint16_t data_len,
+                                      uint8_t tags[][NFC_TAG_SEOS_DATA_TAG_MAX],
+                                      uint8_t *tag_lens, uint8_t *tag_count) {
+    if (data_len < 3 || (data[0] != 0x5C && data[0] != 0x4D)) {
+        return false;
+    }
+    uint8_t body_len = data[1];
+    if (body_len == 0 || data_len < (uint16_t)(2 + body_len)) {
+        return false;
+    }
+    uint16_t end = (uint16_t)(2 + body_len);
+    uint16_t offset = 2;
+    *tag_count = 0;
+    while (offset < end) {
+        if (*tag_count >= SEOS_MAX_REQUESTED_TAGS) {
+            return false;
+        }
+        if (!seos_read_ber_tag(data, end, &offset, tags[*tag_count], &tag_lens[*tag_count])) {
+            return false;
+        }
+        if (data[0] == 0x4D) {
+            if (offset >= end || data[offset] != 0x00) {
+                return false;
+            }
+            offset++;
+        }
+        (*tag_count)++;
+    }
+    if (data[0] == 0x5C && *tag_count != 1) {
+        return false;
+    }
+    return *tag_count > 0;
+}
+
 const uint8_t *seos_auth_master_for_keyslot(const nfc_tag_seos_information_t *info, uint8_t keyslot) {
     if (keyslot == SEOS_KEYSLOT_WRITE) {
         return info->authkey_write;
@@ -945,60 +1070,67 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
                         NRF_LOG_ERROR("Seos: Update Data failed: Invalid object.");
                         break;
                     }
-                    memcpy(m_tag_information->data_tag, obj_tag, obj_tag_len);
-                    m_tag_information->data_tag_len = obj_tag_len;
-                    memcpy(m_tag_information->data, obj_val, obj_len);
-                    m_tag_information->data_len = obj_len;
+                    if (!seos_store_named_object(m_tag_information, obj_tag, obj_tag_len, obj_val, obj_len)) {
+                        NRF_LOG_ERROR("Seos: Update Data failed: No room for object.");
+                        break;
+                    }
                 } else {
-                    //5c 02 ff 00
-                    if (request[0] != 0x5C) {
-                        NRF_LOG_ERROR("Seos: Get Data failed: Invalid request TLV. Expected tag 5C, but got %02X.", request[0]);
-                        break;
-                    }
-
-                    if (request[1] != m_tag_information->data_tag_len || memcmp(request + 2, m_tag_information->data_tag, m_tag_information->data_tag_len) != 0) {
-                        NRF_LOG_ERROR("Seos: Get Data failed: Requested invalid data tag.");
-                        break;
-                    }
-
-                    uint8_t reply_len = m_tag_information->data_tag_len + 1 + m_tag_information->data_len;
-                    reply_len = round_to_next(reply_len, bs);
-                    if (reply_len > WORK_BUFFER_SIZE) {
-                        NRF_LOG_ERROR("Seos: Get Data failed: Unable to generate reply: too long.");
+                    uint8_t req_tags[SEOS_MAX_REQUESTED_TAGS][NFC_TAG_SEOS_DATA_TAG_MAX];
+                    uint8_t req_tag_lens[SEOS_MAX_REQUESTED_TAGS];
+                    uint8_t req_tag_count = 0;
+                    if (!seos_parse_requested_tags(request, cryptogram_length, req_tags, req_tag_lens, &req_tag_count)) {
+                        NRF_LOG_ERROR("Seos: Get Data failed: Invalid tag list.");
                         break;
                     }
 
                     uint8_t *reply = work_buffer_a;
-
-                    uint8_t reply_idx = 0;
-                    memcpy(reply + reply_idx, m_tag_information->data_tag, m_tag_information->data_tag_len); // Tag
-                    reply_idx += m_tag_information->data_tag_len;
-                    reply[reply_idx++] = m_tag_information->data_len; // Length
-                    memcpy(reply + reply_idx, m_tag_information->data, m_tag_information->data_len); // Value
-                    reply_idx += m_tag_information->data_len;
-
-                    if (reply_idx != reply_len) {
-                        memset(reply + reply_idx, 0, reply_len - reply_idx);
-                        // Add 0x80 at first byte after data for start of padding
-                        reply[reply_idx] = 0x80;
+                    uint16_t reply_idx = 0;
+                    for (uint8_t i = 0; i < req_tag_count; i++) {
+                        const uint8_t *obj_data = NULL;
+                        uint8_t obj_len = 0;
+                        if (!seos_find_object(m_tag_information, req_tags[i], req_tag_lens[i], &obj_data, &obj_len)) {
+                            continue;
+                        }
+                        if ((uint16_t)(reply_idx + req_tag_lens[i] + 1 + obj_len) > WORK_BUFFER_SIZE) {
+                            NRF_LOG_ERROR("Seos: Get Data failed: Unable to generate reply: too long.");
+                            reply_idx = 0;
+                            break;
+                        }
+                        memcpy(reply + reply_idx, req_tags[i], req_tag_lens[i]);
+                        reply_idx += req_tag_lens[i];
+                        reply[reply_idx++] = obj_len;
+                        memcpy(reply + reply_idx, obj_data, obj_len);
+                        reply_idx += obj_len;
                     }
 
-                    uint8_t *reply_cryptogram = work_buffer_b;
-                    if (!generate_cryptogram(diver_encr_key, false, reply, reply_len, reply_cryptogram, m_tag_information->encr_alg)) {
-                        NRF_LOG_ERROR("Seos: Get Data failed: Failed to create reply cryptogram.");
-                        break;
-                    }
+                    if (reply_idx > 0) {
+                        uint8_t reply_len = (uint8_t)round_to_next(reply_idx, bs);
+                        if (reply_len > WORK_BUFFER_SIZE) {
+                            NRF_LOG_ERROR("Seos: Get Data failed: Unable to generate reply: too long.");
+                            break;
+                        }
 
-                    if (2 + reply_len + 4 + 2 + recvd_cmac_length > NFC_14A_4_MAX_APDU) {
-                        NRF_LOG_ERROR("Seos: Get Data failed: Response too large for buffer.");
-                        break;
-                    }
+                        if (reply_idx != reply_len) {
+                            memset(reply + reply_idx, 0, reply_len - reply_idx);
+                            reply[reply_idx] = 0x80;
+                        }
 
-                    // Only include a cryptogram for GET DATA
-                    m_tcl_session_state.m_resp_buf[tlv_idx++] = 0x85; // Tag: cryptogram
-                    m_tcl_session_state.m_resp_buf[tlv_idx++] = reply_len; // Length
-                    memcpy(m_tcl_session_state.m_resp_buf + tlv_idx, reply_cryptogram, reply_len);
-                    tlv_idx += reply_len;
+                        uint8_t *reply_cryptogram = work_buffer_b;
+                        if (!generate_cryptogram(diver_encr_key, false, reply, reply_len, reply_cryptogram, m_tag_information->encr_alg)) {
+                            NRF_LOG_ERROR("Seos: Get Data failed: Failed to create reply cryptogram.");
+                            break;
+                        }
+
+                        if (2 + reply_len + 4 + 2 + recvd_cmac_length > NFC_14A_4_MAX_APDU) {
+                            NRF_LOG_ERROR("Seos: Get Data failed: Response too large for buffer.");
+                            break;
+                        }
+
+                        m_tcl_session_state.m_resp_buf[tlv_idx++] = 0x85;
+                        m_tcl_session_state.m_resp_buf[tlv_idx++] = reply_len;
+                        memcpy(m_tcl_session_state.m_resp_buf + tlv_idx, reply_cryptogram, reply_len);
+                        tlv_idx += reply_len;
+                    }
                 }
 
                 // Whether we GET DATA or PUT DATA, add the response status code and CMAC
@@ -1094,6 +1226,9 @@ int nfc_tag_seos_data_loadcb(tag_specific_type_t type, tag_data_buffer_t *buffer
     if (!seos_writekey_valid(m_tag_information)) {
         seos_apply_default_writekey(m_tag_information);
     }
+    if (!seos_objects_valid(m_tag_information)) {
+        seos_apply_empty_objects(m_tag_information);
+    }
     memcpy(session_uid, m_tag_information->res_coll.uid, sizeof(session_uid));
     seos_refresh_session();
 
@@ -1163,6 +1298,7 @@ bool nfc_tag_seos_data_factory(uint8_t slot, tag_specific_type_t tag_type) {
     info.hash_alg = SEOS_HASHING_SHA256;
     seos_apply_factory_gdf(&info);
     seos_apply_default_writekey(&info);
+    seos_apply_empty_objects(&info);
 
     fds_slot_record_map_t map_info;
     get_fds_map_by_slot_sense_type_for_dump(slot, TAG_SENSE_HF, &map_info);

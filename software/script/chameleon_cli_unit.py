@@ -56,10 +56,12 @@ from chameleon_enum import HIDFormat
 from chameleon_seos import (
     add_seos_alg_args,
     add_seos_gdf_args,
+    add_seos_object_arg,
     add_seos_write_key_arg,
     format_seos_eview,
     parse_seos_encr_alg,
     parse_seos_hash_alg,
+    seos_parse_object_arg,
 )
 from crypto1 import Crypto1
 
@@ -11492,6 +11494,7 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
         )
         add_seos_alg_args(parser)
         add_seos_gdf_args(parser)
+        add_seos_object_arg(parser)
         return parser
 
     def on_exec(self, args: argparse.Namespace):
@@ -11525,6 +11528,7 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
             and args.encr is None
             and args.gdf_oid is None
             and args.gdf_div is None
+            and args.object is None
             and change_requested is False
         ):
             print(color_string((CR, "Error: No changes were requested.")))
@@ -11600,6 +11604,16 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
             )
             return
 
+        extras = seos_data.get("extras")
+        if args.object is not None:
+            extras = []
+            try:
+                for item in args.object:
+                    extras.append(seos_parse_object_arg(item))
+            except ValueError as err:
+                print(color_string((CR, f"Error: {err}")))
+                return
+
         self.cmd.seos_write_emu_data(
             data=data,
             oid=oid,
@@ -11609,6 +11623,7 @@ class HFSeosELoad(SlotIndexArgsAndGoUnit, HF14AAntiCollArgsUnit, DeviceRequiredU
             encr_alg=encr_alg,
             gdf_oid=gdf_oid,
             gdf_diversifier=gdf_diversifier,
+            extras=extras,
         )
 
 
