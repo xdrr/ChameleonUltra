@@ -131,14 +131,12 @@ static void seos_shift_left8(const uint8_t *in, uint8_t *out) {
 }
 
 static bool seos_des_cmac(const uint8_t *key, const uint8_t *input, size_t length, uint8_t *output) {
-    uint8_t iv[8];
     uint8_t zero[8];
     uint8_t l[8];
     uint8_t k1[8];
     uint8_t k2[8];
     memset(zero, 0, 8);
-    memset(iv, 0, 8);
-    ulc_tdes_enc_cbc(l, zero, 8, key, iv);
+    ulc_tdes_enc_ecb(l, zero, key);
 
     seos_shift_left8(l, k1);
     if (l[0] & 0x80) {
@@ -174,12 +172,10 @@ static bool seos_des_cmac(const uint8_t *key, const uint8_t *input, size_t lengt
     memset(x, 0, 8);
     for (size_t i = 0; i + 1 < n; i++) {
         seos_xor8(y, x, input + i * 8);
-        memset(iv, 0, 8);
-        ulc_tdes_enc_cbc(x, y, 8, key, iv);
+        ulc_tdes_enc_ecb(x, y, key);
     }
     seos_xor8(y, x, last);
-    memset(iv, 0, 8);
-    ulc_tdes_enc_cbc(output, y, 8, key, iv);
+    ulc_tdes_enc_ecb(output, y, key);
     return true;
 }
 
@@ -838,7 +834,23 @@ static bool seos_object_is_large(void) {
 }
 
 static bool seos_ins_needs_wtx(uint8_t ins) {
-    return (ins == 0xCB || ins == 0xDA || ins == 0xDB) && seos_object_is_large();
+    if (!((ins == 0xCB || ins == 0xDA || ins == 0xDB) && seos_object_is_large())) {
+        return false;
+    }
+    /* Software 2K3DES of leftover GET DATA overruns the WTX/ACK path.
+     * Finish it in the I-block ISR inside advertised FWT instead. */
+    if (m_tag_information != NULL &&
+        m_tag_information->encr_alg == SEOS_ENCRYPTION_2K3DES) {
+        return false;
+    }
+    return true;
+}
+
+static bool seos_ins_uses_extended_fwt(uint8_t ins) {
+    return (ins == 0xCB || ins == 0xDA || ins == 0xDB) &&
+           seos_object_is_large() &&
+           m_tag_information != NULL &&
+           m_tag_information->encr_alg == SEOS_ENCRYPTION_2K3DES;
 }
 
 static bool seos_pcb_is_wtx(uint8_t pcb) {
@@ -1530,6 +1542,15 @@ static void nfc_tag_seos_state_handler(uint8_t *data, uint16_t szBytes) {
         seos_iblock_ready = false;
         m_tcl_session_state.m_response_ready = false;
         nfc_tag_14a_4_base_respond(&m_tcl_session_state);
+        return;
+    }
+
+    if (m_tcl_session_state.m_apdu_len >= 2 &&
+        seos_ins_uses_extended_fwt(m_tcl_session_state.m_apdu_buf[1])) {
+        seos_extended_fwt = true;
+        nfc_tag_14a_set_frame_delay_max(SEOS_FDT_FWT);
+        nfc_tag_seos_process_apdu();
+        seos_extended_fwt = false;
         return;
     }
 

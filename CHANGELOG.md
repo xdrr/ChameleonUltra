@@ -20,6 +20,7 @@ This project uses the changelog in accordance with [keepchangelog](http://keepac
  - SEOS CLI: `hf seos keys --adf2-auth/--adf2-privenc/--adf2-privmac/--adf2-write` loads distinct ADF2 keys without copying the primary set
  - SEOS host: ISO7816 leftover retry (`6C xx` then GET RESPONSE) and 2K3DES GET DATA wrap/unwrap
  - SEOS emulator: GET/UPDATE DATA send S(WTX) for large objects, finish crypto on the main loop after the reader ACK, and keep FWT alive until the I-block is ready
+ - SEOS emulator: faster software 2K3DES (raw S-box index, 64-bit subkeys, two-key cache) and finish large 2K3DES GET/UPDATE DATA in the I-block window so leftover 255-byte objects can complete
  - SEOS emulator: GET DATA reply length and BER length use 16-bit values so 255-byte objects pad to 272 instead of wrapping a uint8_t
 
 ## [v2.3.0][2026-10-24]

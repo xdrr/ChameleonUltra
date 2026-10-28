@@ -678,7 +678,13 @@ SEOS_INS_UPDATE_DATA = 0xDB
 
 
 def seos_ins_needs_wtx(ins: int, encr_alg: Optional[int] = None) -> bool:
-    return ins in (SEOS_INS_GET_DATA, SEOS_INS_PUT_DATA, SEOS_INS_UPDATE_DATA)
+    if ins not in (SEOS_INS_GET_DATA, SEOS_INS_PUT_DATA, SEOS_INS_UPDATE_DATA):
+        return False
+    # Software 2K3DES finishes in the I-block ISR inside advertised FWT.
+    # Deferring it through WTX starves keep-alives and drops leftover GET DATA.
+    if encr_alg == SEOS_ENCR_2K3DES:
+        return False
+    return True
 
 
 def seos_pcb_is_wtx(pcb: int) -> bool:

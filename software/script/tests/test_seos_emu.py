@@ -525,6 +525,10 @@ class TestSeosWtxDeferral(unittest.TestCase):
         self.assertEqual(seos_wtx_on_iblock(0xA4), SEOS_WTX_PROCESS)
         self.assertEqual(seos_wtx_on_iblock(0xC0), SEOS_WTX_PROCESS)
 
+    def test_2k3des_large_get_data_stays_in_iblock(self):
+        self.assertFalse(seos_ins_needs_wtx(0xCB, SEOS_ENCR_2K3DES))
+        self.assertEqual(seos_wtx_on_iblock(0xCB, SEOS_ENCR_2K3DES), SEOS_WTX_PROCESS)
+
     def test_sblock_ack_does_not_run_crypto(self):
         self.assertFalse(seos_wtx_process_on_ack())
         self.assertEqual(
